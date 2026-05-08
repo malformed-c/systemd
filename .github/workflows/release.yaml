@@ -1,0 +1,55 @@
+---
+name: Build and Release systemd-nspawn
+
+on:
+  workflow_dispatch: # Run manually
+  push:
+    tags:
+      - "v*" # Triggers when a tag like v1.0.1 pushed
+
+permissions:
+  contents: write # Required to create a release and upload assets
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson \
+            ninja-build \
+            pkg-config \
+            gcc \
+            gettext \
+            libcap-dev \
+            libselinux1-dev \
+            libsystemd-dev \
+            util-linux \
+            python3-pip
+
+      - name: Configure Build (Meson)
+        run: |
+          meson setup build \
+            --buildtype=release \
+            --prefix=/usr
+
+      - name: Build ONLY systemd-nspawn
+        run: |
+          ninja -C build src/systemd-nspawn
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # This automatically creates the release based on the tag (e.g., v1.0.1)
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
+          draft: false
+          # Uploads compiled binary to the release page
+          files: build/src/systemd-nspawn
