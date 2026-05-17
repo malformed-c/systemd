@@ -1,0 +1,116 @@
+---
+name: Build and Release systemd-nspawn
+
+on:
+  workflow_dispatch: # Run manually
+  push:
+    tags:
+      - "v*" # Triggers when a tag like v1.0.1 pushed
+
+permissions:
+  contents: write # Required to create a release and upload assets
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  # We tell Meson to use ccache as a wrapper for the compiler
+  CC: "ccache gcc"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Apt Packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-packages
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libseccomp-dev \
+            libpam0g-dev \
+            meson \
+            ninja-build \
+            pkg-config \
+            patchelf \
+            gcc \
+            libbpf-dev linux-tools-common linux-tools-generic linux-tools-$(uname -r) \
+            clang \
+            llvm \
+            ccache \
+            gperf \
+            bison \
+            flex \
+            gettext \
+            libcap-dev \
+            libselinux1-dev \
+            libsystemd-dev \
+            util-linux libmount-dev libblkid-dev \
+            python3-pip
+
+      - name: Fix bpftool path
+        run: |
+          # Find where the actual binary is located
+          BPFTOOL_PATH=$(find /usr/lib/linux-tools-$(uname -r) -name bpftool | head -n 1)
+
+          # If not found there, try the generic tools path
+          if [ -z "$BPFTOOL_PATH" ]; then
+            BPFTOOL_PATH=$(find /usr/lib/linux-tools-* -name bpftool | head -n 1)
+          fi
+
+          echo "Found bpftool at: $BPFTOOL_PATH"
+
+          # Force link it to the location Meson expects
+          sudo ln -sf "$BPFTOOL_PATH" /usr/sbin/bpftool
+
+          # Verify it works
+          /usr/sbin/bpftool --version
+
+      - name: Caching ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          # The key changes if the OS changes, ensuring we don't use
+          # caches from different Ubuntu versions.
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          # restore-keys allows us to pull the most recent cache
+          # even if the exact SHA doesn't match
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Configure ccache
+        run: |
+          ccache -M 500M # Limit cache size to 500MB to avoid GH Action limits
+
+      - name: Configure Build (Meson)
+        run: |
+          meson setup build \
+            -Dstandalone-binaries=true \
+            --buildtype=release
+
+      - name: Build only systemd-nspawn
+        run: |
+          ninja -C build systemd-nspawn
+
+      - name: Patch rpath
+        run: |
+          patchelf --set-rpath '$ORIGIN' build/systemd-nspawn
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # This automatically creates the release based on the tag (e.g., v1.0.1)
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
+          draft: false
+          # Uploads compiled binary to the release page
+          files: |
+            build/systemd-nspawn
+            build/**/libsystemd-shared-*.so
