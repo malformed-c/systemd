@@ -3875,7 +3875,7 @@ static DissectImageFlags determine_dissect_image_flags(void) {
                  (arg_userns_ownership != USER_NAMESPACE_OWNERSHIP_AUTO) ? DISSECT_IMAGE_IDENTITY_UID : 0);
 }
 
-static int apply_deferred_mstack_bind_mounts(MStack *mstack, const char *directory) {
+static int apply_deferred_mstack_bind_mounts(MStack *mstack, const char *directory, MStackFlags flags) {
         int r;
 
         /* Open an O_PATH fd anchored to the staged container root so that
@@ -3889,9 +3889,9 @@ static int apply_deferred_mstack_bind_mounts(MStack *mstack, const char *directo
          * volatile overlay. We pass directory as the mount root so
          * bind targets are constructed against the staged container root rather than
          * the host filesystem. */
-        r = mstack_apply_bind_mounts(mstack, root_fd, directory);
+        r = mstack_apply_bind_mounts(mstack, root_fd, directory, flags);
         if (r < 0)
-                return log_error_errno(r, "Failed to apply deferred .mstack bind mounts: %m");
+                return r;
 
         log_debug("Applied deferred .mstack bind mounts.");
 
@@ -3914,6 +3914,7 @@ static int outer_child(
         bool idmap = false;
         ssize_t l;
         int r;
+        MStackFlags mstack_flags = 0;
 
         /* This is the "outer" child process, i.e the one forked off by the container manager itself.  Its
          * namespace situation is:
@@ -3994,7 +3995,14 @@ static int outer_child(
                 assert(!arg_image);
                 assert(arg_mstack);
 
-                MStackFlags mstack_flags = arg_read_only ? MSTACK_RDONLY : 0;
+                /* Opt-in to the default behavior. */
+                if (arg_read_only)
+                        mstack_flags |= MSTACK_RDONLY;
+
+                /* Decouple arg_read_only from mstack binds. */
+                if (FLAGS_SET(arg_settings_mask, SETTING_READ_ONLY))
+                        mstack_flags |= MSTACK_BINDS_RDONLY;
+
                 bool writable = mstack_has_writable_layers(mstack, 0);
 
                 /* Defer binds only if using an mstack root
@@ -4013,7 +4021,7 @@ static int outer_child(
                 if (mstack->has_overlayfs && writable && arg_volatile_mode != VOLATILE_NO)
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                         "Cannot combine .mstack/ rw/ directory with --volatile=. "
-                                        "Use either rw/ for persistent writes or --volatile= for ephemeral writes, not both.");
+                                        "Use either rw/ for persistent state or --volatile= for ephemeral writes, not both.");
 
                 /* This creates the needed overlayfs or tmpfs, owned by our target userns. Note that we pass
                  * the target mount dir as temporary mount dir here. We after all just need some dir here
@@ -4026,10 +4034,8 @@ static int outer_child(
                 if (r < 0)
                         return log_error_errno(r, "Failed to make .mstack/ mounts: %m");
 
-                /* And then attaches all mounts to the directory
-                 * If volatile is set, we're skipping bind mounts
-                 * to mount them after tmpfs overlay,
-                 * mounting only root. */
+                /* And then attaches all mounts to the directory. If volatile is set, we're
+                 * skipping bind mounts to mount them after tmpfs overlay, mounting only root. */
                 r = mstack_bind_mounts(
                                 mstack,
                                 directory,
@@ -4369,7 +4375,7 @@ static int outer_child(
         if (mstack && IN_SET(arg_volatile_mode, VOLATILE_YES, VOLATILE_OVERLAY, VOLATILE_STATE)) {
                 assert(arg_mstack);
 
-                r = apply_deferred_mstack_bind_mounts(mstack, directory);
+                r = apply_deferred_mstack_bind_mounts(mstack, directory, mstack_flags);
                 if (r < 0)
                         return r;
         }
