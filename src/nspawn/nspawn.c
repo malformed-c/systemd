@@ -4487,7 +4487,10 @@ static int outer_child(
         if (notify_fd < 0)
                 return notify_fd;
 
-        /* Join the external netns first, before dropping outer's CAP_SYS_ADMIN capability. */
+        /* Join the external network namespace first, while we are still in the parent's
+         * user namespace and have CAP_SYS_ADMIN there. Once we clone with CLONE_NEWUSER,
+         * the child will be in a new user namespace, lacking the capabilities in the
+         * parent user namespace required to join its network namespace. */
         if (arg_network_namespace_path && setns(netns_fd, CLONE_NEWNET) < 0)
                 return log_error_errno(errno, "Failed to join network namespace: %m");
 
