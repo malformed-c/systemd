@@ -4018,7 +4018,7 @@ static int outer_child(
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                         "Cannot combine .mstack/ rw/ directory with --read-only.");
 
-                if (mstack->has_overlayfs && writable && arg_volatile_mode != VOLATILE_NO)
+                if (writable && arg_volatile_mode != VOLATILE_NO)
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                         "Cannot combine .mstack/ rw/ directory with --volatile=. "
                                         "Use either rw/ for persistent state or --volatile= for ephemeral writes, not both.");
@@ -4043,7 +4043,7 @@ static int outer_child(
                                 mstack_flags,
                                 /* ret_root_fd= */ NULL);
                 if (r < 0)
-                        return log_error_errno(r, "Failed bind mount .mstack/ mounts: %m");
+                        return log_error_errno(r, "Failed to bind .mstack/ mounts: %m");
         } else {
                 assert(arg_directory);
                 assert(!arg_image);

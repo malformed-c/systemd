@@ -930,6 +930,8 @@ int mstack_make_mounts(
         assert(mstack);
         assert(temp_mount_dir);
 
+        bool writable = mstack_has_writable_layers(mstack, flags);
+
         _cleanup_close_ int overlayfs_mnt_fd = -EBADF;
         r = mstack_make_overlayfs(mstack, temp_mount_dir, flags, &overlayfs_mnt_fd);
         if (r < 0)
@@ -976,8 +978,8 @@ int mstack_make_mounts(
 
                 if (mount_setattr(mstack->usr_mount_fd, "", AT_EMPTY_PATH,
                                   &(struct mount_attr) {
-                                          .attr_set = mount_is_ro(mstack->root_mount, flags) ? MOUNT_ATTR_RDONLY : 0,
-                                          .attr_clr = mount_is_ro(mstack->root_mount, flags) ? 0 : MOUNT_ATTR_RDONLY,
+                                          .attr_set = writable ? 0: MOUNT_ATTR_RDONLY,
+                                          .attr_clr = writable ? MOUNT_ATTR_RDONLY : 0,
                                           .propagation = MS_PRIVATE, /* disconnect us from bind mount source */
                                   }, sizeof(struct mount_attr)) < 0)
                         return log_debug_errno(errno, "Failed to mark usr bind mount read-only: %m");
@@ -1047,14 +1049,35 @@ int mstack_apply_bind_mounts(
 
                 assert(m->mount_fd >= 0);
 
+                _cleanup_close_ int parent_fd = -EBADF;
                 _cleanup_close_ int subdir_fd = -EBADF;
-                r = chaseat(root_fd, root_fd, m->where, CHASE_PROHIBIT_SYMLINKS|CHASE_MKDIR_0755|CHASE_MUST_BE_DIRECTORY, /* ret_path= */ NULL, &subdir_fd);
+                _cleanup_free_ char *filename = NULL;
+
+                /* Resolve parent directory. This allows resolving benign path symlinks
+                 *    (like /var/run -> /run) safely while staying within the root_fd boundary.
+                 *    We do NOT pass CHASE_PROHIBIT_SYMLINKS here to allow resolution. */
+                parent_fd = chase_and_open_parent_at(root_fd, root_fd, m->where, CHASE_MKDIR_0755, &filename);
+                if (parent_fd == -EROFS)
+                        return log_error_errno(parent_fd, "Failed to create parent directory for '%s': root is read-only. "
+                                        "Add an rw/ directory to the .mstack/, use --volatile= to provide a writable root layer, "
+                                        "or pre-create bind target directory in the base layer: %m", m->where);
+                if (parent_fd < 0)
+                        return log_debug_errno(parent_fd, "Failed to open parent of mount point '%s': %m", m->where);
+
+                /* Resolve, validate, and/or create the leaf target directory relative to parent_fd. */
+                r = chaseat(root_fd, parent_fd, filename, CHASE_PROHIBIT_SYMLINKS|CHASE_MKDIR_0755|CHASE_MUST_BE_DIRECTORY, /* ret_path= */ NULL, &subdir_fd);
                 if (r == -EROFS)
                         return log_error_errno(r, "Failed to create mount point directory '%s': root is read-only. "
                                         "Add an rw/ directory to the .mstack/, use --volatile= to provide a writable root layer, "
-                                        "or pre-create bind mount target directory in the base layer: %m", m->where);
-                if (r < 0)
+                                        "or pre-create bind target directory in the base layer: %m", m->where);
+                if (r < 0) {
+                        if (IN_SET(r, -ELOOP, -EREMCHG))
+                                return log_error_errno(SYNTHETIC_ERRNO(EPERM),
+                                                       "Security violation: Mount target '%s' is a symbolic link.",
+                                                       m->where);
+
                         return log_debug_errno(r, "Failed to open mount point inode '%s': %m", m->where);
+                }
 
                 if (move_mount(m->mount_fd, "", subdir_fd, "", MOVE_MOUNT_F_EMPTY_PATH|MOVE_MOUNT_T_EMPTY_PATH) < 0)
                         return log_debug_errno(errno, "Failed to attach bind mount to '%s' subdir: %m", m->where);
