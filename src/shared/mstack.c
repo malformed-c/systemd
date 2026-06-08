@@ -14,7 +14,6 @@
 #include "fs-util.h"
 #include "log.h"
 #include "loop-util.h"
-#include "macro-fundamental.h"
 #include "macro.h"
 #include "mount-util.h"
 #include "mstack.h"
