@@ -7,37 +7,49 @@ set -o pipefail
 . "$(dirname "$0")"/util.sh
 
 # Only reuse the user namespace
-systemd-run --unit=oldservice --property=Type=exec --property=PrivateUsers=true sleep 3600
+systemd-run --unit=oldservice --property=Type=notify --property=NotifyAccess=all --property=PrivateUsers=true bash -c 'systemd-notify --ready; exec sleep 3600'
 OLD_PID=$(systemctl show oldservice -p MainPID | awk -F= '{print $2}')
 
-systemd-run --unit=newservice --property=Type=exec --property=UserNamespacePath=/proc/"$OLD_PID"/ns/user --property=PrivateNetwork=true sleep 3600
+systemd-run --unit=newservice --property=Type=notify --property=NotifyAccess=all --property=UserNamespacePath=/proc/"$OLD_PID"/ns/user --property=PrivateNetwork=true bash -c 'systemd-notify --ready; exec sleep 3600'
 NEW_PID=$(systemctl show newservice -p MainPID | awk -F= '{print $2}')
 
-assert_neq "$(lsns -p "$OLD_PID" -o NS -t net -n)" "$(lsns -p "$NEW_PID" -o NS -t net -n)"
-assert_eq "$(lsns -p "$OLD_PID" -o NS -t user -n)" "$(lsns -p "$NEW_PID" -o NS -t user -n)"
+OLD_NETNS="$(readlink -v /proc/"$OLD_PID"/ns/net)"
+NEW_NETNS="$(readlink -v /proc/"$NEW_PID"/ns/net)"
+assert_neq "$OLD_NETNS" "$NEW_NETNS"
+OLD_USERNS="$(readlink -v /proc/"$OLD_PID"/ns/user)"
+NEW_USERNS="$(readlink -v /proc/"$NEW_PID"/ns/user)"
+assert_eq "$OLD_USERNS" "$NEW_USERNS"
 
 systemctl stop oldservice newservice
 
 # Reuse the user and network namespaces
-systemd-run --unit=oldservice --property=Type=exec --property=PrivateUsers=true --property=PrivateNetwork=true sleep 3600
+systemd-run --unit=oldservice --property=Type=notify --property=NotifyAccess=all --property=PrivateUsers=true --property=PrivateNetwork=true bash -c 'systemd-notify --ready; exec sleep 3600'
 OLD_PID=$(systemctl show oldservice -p MainPID | awk -F= '{print $2}')
 
-systemd-run --unit=newservice --property=Type=exec --property=UserNamespacePath=/proc/"$OLD_PID"/ns/user --property=NetworkNamespacePath=/proc/"$OLD_PID"/ns/net sleep 3600
+systemd-run --unit=newservice --property=Type=notify --property=NotifyAccess=all --property=UserNamespacePath=/proc/"$OLD_PID"/ns/user --property=NetworkNamespacePath=/proc/"$OLD_PID"/ns/net bash -c 'systemd-notify --ready; exec sleep 3600'
 NEW_PID=$(systemctl show newservice -p MainPID | awk -F= '{print $2}')
 
-assert_eq "$(lsns -p "$OLD_PID" -o NS -t net -n)" "$(lsns -p "$NEW_PID" -o NS -t net -n)"
-assert_eq "$(lsns -p "$OLD_PID" -o NS -t user -n)" "$(lsns -p "$NEW_PID" -o NS -t user -n)"
+OLD_NETNS="$(readlink -v /proc/"$OLD_PID"/ns/net)"
+NEW_NETNS="$(readlink -v /proc/"$NEW_PID"/ns/net)"
+assert_eq "$OLD_NETNS" "$NEW_NETNS"
+OLD_USERNS="$(readlink -v /proc/"$OLD_PID"/ns/user)"
+NEW_USERNS="$(readlink -v /proc/"$NEW_PID"/ns/user)"
+assert_eq "$OLD_USERNS" "$NEW_USERNS"
 
 systemctl stop oldservice newservice
 
 # Delegate the network namespace
-systemd-run --unit=oldservice --property=Type=exec --property=PrivateUsers=true sleep 3600
+systemd-run --unit=oldservice --property=Type=notify --property=NotifyAccess=all --property=PrivateUsers=true bash -c 'systemd-notify --ready; exec sleep 3600'
 OLD_PID=$(systemctl show oldservice -p MainPID | awk -F= '{print $2}')
 
-systemd-run --unit=newservice --property=Type=exec --property=UserNamespacePath=/proc/"$OLD_PID"/ns/user --property=DelegateNamespaces=net --property=PrivateNetwork=true sleep 3600
+systemd-run --unit=newservice --property=Type=notify --property=NotifyAccess=all --property=UserNamespacePath=/proc/"$OLD_PID"/ns/user --property=DelegateNamespaces=net --property=PrivateNetwork=true bash -c 'systemd-notify --ready; exec sleep 3600'
 NEW_PID=$(systemctl show newservice -p MainPID | awk -F= '{print $2}')
 
-assert_neq "$(lsns -p "$OLD_PID" -o NS -t net -n)" "$(lsns -p "$NEW_PID" -o NS -t net -n)"
-assert_eq "$(lsns -p "$OLD_PID" -o NS -t user -n)" "$(lsns -p "$NEW_PID" -o NS -t user -n)"
+OLD_NETNS="$(readlink -v /proc/"$OLD_PID"/ns/net)"
+NEW_NETNS="$(readlink -v /proc/"$NEW_PID"/ns/net)"
+assert_neq "$OLD_NETNS" "$NEW_NETNS"
+OLD_USERNS="$(readlink -v /proc/"$OLD_PID"/ns/user)"
+NEW_USERNS="$(readlink -v /proc/"$NEW_PID"/ns/user)"
+assert_eq "$OLD_USERNS" "$NEW_USERNS"
 
 systemctl stop oldservice newservice

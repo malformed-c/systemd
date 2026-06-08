@@ -214,7 +214,7 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 static int print_welcome(sd_varlink **mute_console_link) {
-        _cleanup_free_ char *pretty_name = NULL, *os_name = NULL, *ansi_color = NULL;
+        _cleanup_free_ char *pretty_name = NULL, *os_name = NULL, *ansi_color = NULL, *fancy_name = NULL;
         const char *pn, *ac;
         int r;
 
@@ -229,6 +229,7 @@ static int print_welcome(sd_varlink **mute_console_link) {
         r = parse_os_release(
                         /* root= */ NULL,
                         "PRETTY_NAME", &pretty_name,
+                        "FANCY_NAME",  &fancy_name,
                         "NAME",        &os_name,
                         "ANSI_COLOR",  &ansi_color);
         if (r < 0)
@@ -238,7 +239,9 @@ static int print_welcome(sd_varlink **mute_console_link) {
         pn = os_release_pretty_name(pretty_name, os_name);
         ac = isempty(ansi_color) ? "0" : ansi_color;
 
-        if (colors_enabled())
+        if (use_fancy_name(unescape_fancy_name(&fancy_name)))
+                printf(ANSI_HIGHLIGHT "Welcome to the " ANSI_NORMAL "%s" ANSI_HIGHLIGHT " Installer!" ANSI_NORMAL "\n", fancy_name);
+        else if (colors_enabled())
                 printf(ANSI_HIGHLIGHT "Welcome to the " ANSI_NORMAL "\x1B[%sm%s" ANSI_HIGHLIGHT " Installer!" ANSI_NORMAL "\n", ac, pn);
         else
                 printf("Welcome to the %s Installer!\n", pn);
@@ -381,6 +384,7 @@ static int prompt_block_device(sd_varlink **repart_link, char **ret_node) {
 
         r = prompt_loop("Please enter target disk device",
                         GLYPH_COMPUTER_DISK,
+                        /* prefill= */ NULL,
                         menu,
                         accepted,
                         /* ellipsize_percentage= */ 20,
@@ -537,6 +541,7 @@ static int prompt_erase(
                         "Please type 'keep' to install the OS in addition to what the disk already contains, or 'erase' to erase all data on the disk" :
                         "Please type 'erase' to confirm that all data on the disk shall be erased",
                         GLYPH_BROOM,
+                        /* prefill= */ NULL,
                         /* menu= */ l,
                         /* accepted= */ l,
                         /* ellipsize_percentage= */ 20,
@@ -575,6 +580,7 @@ static int prompt_touch_variables(void) {
         _cleanup_free_ char *reply = NULL;
         r = prompt_loop("Type 'yes' to register OS installation in firmware variables of the local system, 'no' otherwise",
                         GLYPH_ROCKET,
+                        /* prefill= */ "yes",
                         /* menu= */ l,
                         /* accepted= */ l,
                         /* ellipsize_percentage= */ 20,
@@ -613,6 +619,7 @@ static int prompt_confirm(void) {
         r = prompt_loop(arg_summary ? "Please type 'yes' to confirm the choices above and begin the installation" :
                                       "Please type 'yes' to begin the installation",
                         GLYPH_WARNING_SIGN,
+                        /* prefill= */ NULL,
                         /* menu= */ l,
                         /* accepted= */ l,
                         /* ellipsize_percentage= */ 20,
@@ -1242,6 +1249,15 @@ static int settle_definitions(void) {
         return 0;
 }
 
+static void end_marker(void) {
+
+        if (!arg_welcome)
+                return;
+
+        printf("\n%sExiting first boot settings tool.%s\n\n", ansi_grey(), ansi_normal());
+        fflush(stdout);
+}
+
 static int run(int argc, char *argv[]) {
         int r;
 
@@ -1268,6 +1284,7 @@ static int run(int argc, char *argv[]) {
                         chrome_show("Operating System Installer", /* bottom= */ NULL);
         }
 
+        DEFER_VOID_CALL(end_marker);
         DEFER_VOID_CALL(chrome_hide);
 
         _cleanup_(sd_varlink_flush_close_unrefp) sd_varlink *repart_link = NULL;

@@ -1676,7 +1676,7 @@ static int unmerge(
         bool need_to_reload;
         int r;
 
-        (void) dlopen_libmount(LOG_DEBUG);
+        (void) DLOPEN_LIBMOUNT(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_REQUIRED);
 
         r = need_reload(image_class, hierarchies, no_reload);
         if (r < 0)
@@ -2257,9 +2257,9 @@ static int merge(ImageClass image_class,
 
         int r;
 
-        (void) dlopen_cryptsetup(LOG_DEBUG);
-        (void) dlopen_libblkid(LOG_DEBUG);
-        (void) dlopen_libmount(LOG_DEBUG);
+        (void) DLOPEN_CRYPTSETUP(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
+        (void) DLOPEN_LIBBLKID(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_REQUIRED);
+        (void) DLOPEN_LIBMOUNT(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_REQUIRED);
 
         _cleanup_(pidref_done) PidRef pidref = PIDREF_NULL;
         r = pidref_safe_fork("(sd-merge)", FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_NEW_MOUNTNS, &pidref);
@@ -2305,7 +2305,7 @@ static int merge(ImageClass image_class,
         return 1;
 }
 
-VERB(verb_status, "status", NULL, VERB_ANY, 1, VERB_DEFAULT, "Show current merge status (default)");
+VERB_DEFAULT_NOARG(verb_status, "status", "Show current merge status (default)");
 static int verb_status(int argc, char *argv[], uintptr_t _data, void *userdata) {
         _cleanup_(table_unrefp) Table *t = NULL;
         int r, ret = 0;
@@ -3048,7 +3048,7 @@ static int run(int argc, char *argv[]) {
                 return EXIT_SUCCESS;
         }
 
-        return dispatch_verb_with_args(args, NULL);
+        return dispatch_verb(args, NULL);
 }
 
 DEFINE_MAIN_FUNCTION(run);

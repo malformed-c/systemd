@@ -12,8 +12,8 @@ libefitest = static_library(
         ),
         build_by_default : false,
         include_directories : [
-                basic_includes,
                 include_directories('.'),
+                basic_includes,
         ],
         implicit_include_directories : false,
         dependencies : userspace)
@@ -164,8 +164,8 @@ configure_file(
 ############################################################
 
 efi_includes = [
-        fundamental_include,
         include_directories('.'),
+        fundamental_include,
         version_include,
 ]
 
@@ -270,6 +270,9 @@ efi_arch_c_args = {
         'arm'         : ['-mgeneral-regs-only'],
         # Until -mgeneral-regs-only is supported in LoongArch, use the following option instead:
         'loongarch64' : ['-mno-lsx', '-mno-lasx'],
+        # Assume F/D is usable on RISC-V because they're difficult to disable
+        'riscv32'     : ['-march=rv32imafdc_zicsr_zifencei'],
+        'riscv64'     : ['-march=rv64imafdc_zicsr_zifencei'],
         # Pass -m64/32 explicitly to make building on x32 work.
         'x86_64'      : ['-m64', '-march=x86-64', '-mno-red-zone', '-mgeneral-regs-only'],
         'x86'         : ['-m32', '-march=i686', '-mgeneral-regs-only', '-malign-double'],
@@ -320,8 +323,10 @@ libefi_sources = files(
         'efi-string.c',
         'export-vars.c',
         'graphics.c',
+        'hii.c',
         'initrd.c',
         'measure.c',
+        'measure-smbios.c',
         'part-discovery.c',
         'pe.c',
         'random-seed.c',

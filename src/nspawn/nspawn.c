@@ -1639,6 +1639,43 @@ static int verify_arguments(void) {
         return 0;
 }
 
+static int split_boot_parameters(void) {
+        _cleanup_strv_free_ char **kept = NULL;
+        int r;
+
+        /* When the kernel hands the command line to PID 1, any KEY=VALUE assignment whose KEY does not
+         * contain a '.' is exported as an environment variable (with '-' replaced by '_'), rather than
+         * passed as an argument. Mimic the same split here so users can pass kernel-cmdline-style
+         * arguments after the container path and get the behavior they'd get on a real boot. */
+
+        if (arg_start_mode != START_BOOT)
+                return 0;
+
+        STRV_FOREACH(p, arg_parameters) {
+                _cleanup_free_ char *key = NULL, *value = NULL;
+
+                if (split_pair(*p, "=", &key, &value) >= 0 && !strchr(key, '.')) {
+                        string_replace_char(key, '-', '_');
+
+                        if (env_name_is_valid(key) && env_value_is_valid(value)) {
+                                r = strv_env_assign(&arg_setenv, key, value);
+                                if (r < 0)
+                                        return log_error_errno(r, "Cannot assign environment variable: %m");
+
+                                arg_settings_mask |= SETTING_ENVIRONMENT;
+                                continue;
+                        }
+                }
+
+                r = strv_extend(&kept, *p);
+                if (r < 0)
+                        return log_oom();
+        }
+
+        strv_free_and_replace(arg_parameters, kept);
+        return 0;
+}
+
 static int verify_network_interfaces_initialized(void) {
         int r;
         r = test_network_interfaces_initialized(arg_network_interfaces);
@@ -3745,9 +3782,13 @@ static int setup_notify_child(const void *directory) {
         if (r < 0)
                 log_debug_errno(r, "Failed to enable SO_PASSPIDFD, ignoring: %m");
 
-        r = setsockopt_int(fd, SOL_SOCKET, SO_PASSRIGHTS, false);
-        if (r < 0)
-                log_debug_errno(r, "Failed to turn off SO_PASSRIGHTS, ignoring: %m");
+        /* Only allow the container payload to pass file descriptors to us if we ourselves are
+         * supervised by a service manager that enabled the FD store. */
+        if (!fdstore_detected()) {
+                r = setsockopt_int(fd, SOL_SOCKET, SO_PASSRIGHTS, false);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to turn off SO_PASSRIGHTS, ignoring: %m");
+        }
 
         return TAKE_FD(fd);
 }
@@ -4659,6 +4700,76 @@ static int setup_uid_map(
         return 0;
 }
 
+static int forward_fd_store(char **tags, FDSet *fds) {
+        int r;
+
+        /* Forward fd-store related messages to our own service manager, so that file descriptors stored
+         * by the inner payload propagate up the chain and are preserved across restarts. Skip entirely
+         * if we have no upstream supervisor (no NOTIFY_SOCKET) or no fd store available (no FDSTORE).
+         *
+         * Forwarded entries are namespaced with a "payload-" prefix on their FDNAME so that they
+         * cannot collide with fd-store entries that nspawn itself might want to push to its own
+         * upstream supervisor (the container payload and nspawn share a single upstream fdstore
+         * namespace, since there's only one init system per container). */
+        if (!getenv("NOTIFY_SOCKET") || !fdstore_detected())
+                return 0;
+
+        if (strv_contains(tags, "FDSTOREREMOVE=1")) {
+                const char *fdname = strv_find_startswith(tags, "FDNAME=");
+                if (!fdname)
+                        return log_warning_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                 "Got FDSTOREREMOVE=1 from container payload without FDNAME=, ignoring.");
+                if (!fdname_is_valid(fdname))
+                        return log_warning_errno(SYNTHETIC_ERRNO(EINVAL),
+                                                 "Got FDSTOREREMOVE=1 from container payload with invalid FDNAME='%s', ignoring.",
+                                                 fdname);
+
+                r = sd_notifyf(/* unset_environment= */ false,
+                               "FDSTOREREMOVE=1\nFDNAME=payload-%s", fdname);
+                if (r < 0)
+                        return log_warning_errno(r, "Failed to forward FDSTOREREMOVE upstream, ignoring: %m");
+        } else if (strv_contains(tags, "FDSTORE=1")) {
+                if (fdset_isempty(fds)) {
+                        log_debug("Got FDSTORE=1 from container payload without any attached file descriptors, ignoring.");
+                        return 0;
+                }
+
+                _cleanup_free_ int *fds_array = NULL;
+                int n;
+
+                n = fdset_to_array(fds, &fds_array);
+                if (n < 0)
+                        return log_warning_errno(n, "Failed to convert fdset to array, ignoring FDSTORE forward: %m");
+
+                const char *fdname = strv_find_startswith(tags, "FDNAME=");
+                bool fdpoll_off = strv_contains(tags, "FDPOLL=0");
+                _cleanup_free_ char *msg = NULL;
+                unsigned n_fds = (unsigned) n;
+
+                if (fdname && !fdname_is_valid(fdname)) {
+                        log_warning("Got FDSTORE=1 from container payload with invalid FDNAME='%s', ignoring name.", fdname);
+                        fdname = NULL;
+                }
+
+                if (asprintf(&msg, "FDSTORE=1\nFDNAME=payload-%s%s%s",
+                             fdname ?: "stored",
+                             fdpoll_off ? "\nFDPOLL=" : "",
+                             fdpoll_off ? "0" : "") < 0)
+                        return log_oom();
+
+                r = sd_pid_notify_with_fds(
+                                0,
+                                /* unset_environment= */ false,
+                                msg,
+                                fds_array,
+                                n_fds);
+                if (r < 0)
+                        return log_warning_errno(r, "Failed to forward FDSTORE upstream, ignoring: %m");
+        }
+
+        return 0;
+}
+
 static int nspawn_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t revents, void *userdata) {
         PidRef *inner_child_pid = ASSERT_PTR(userdata);
         int r;
@@ -4667,7 +4778,8 @@ static int nspawn_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t r
 
         _cleanup_(pidref_done) PidRef sender_pid = PIDREF_NULL;
         _cleanup_strv_free_ char **tags = NULL;
-        r = notify_recv_strv(fd, &tags, /* ret_ucred= */ NULL, &sender_pid);
+        _cleanup_(fdset_freep) FDSet *fds = NULL;
+        r = notify_recv_with_fds_strv(fd, &tags, /* ret_ucred= */ NULL, &sender_pid, &fds);
         if (r == -EAGAIN)
                 return 0;
         if (r < 0)
@@ -4701,6 +4813,8 @@ static int nspawn_dispatch_notify_fd(sd_event_source *source, int fd, uint32_t r
                 if (!status)
                         (void) sd_notifyf(/* unset_environment= */ false, "STATUS=Container running.");
         }
+
+        (void) forward_fd_store(tags, fds);
 
         return 0;
 }
@@ -4955,8 +5069,13 @@ static int merge_settings(Settings *settings, const char *path) {
 
         if (!FLAGS_SET(arg_settings_mask, SETTING_BIND_USER_SHELL) &&
             settings->bind_user_shell_set) {
-                free_and_replace(arg_bind_user_shell, settings->bind_user_shell);
-                arg_bind_user_shell_copy = settings->bind_user_shell_copy;
+
+                if (!arg_settings_trusted)
+                        log_warning("Ignoring bind user shell setting, file %s is not trusted.", path);
+                else {
+                        free_and_replace(arg_bind_user_shell, settings->bind_user_shell);
+                        arg_bind_user_shell_copy = settings->bind_user_shell_copy;
+                }
         }
 
         if ((arg_settings_mask & SETTING_NOTIFY_READY) == 0 &&
@@ -6106,9 +6225,9 @@ static int run(int argc, char *argv[]) {
         if (arg_cleanup)
                 return do_cleanup();
 
-        (void) dlopen_libmount(LOG_DEBUG);
-        (void) dlopen_libseccomp(LOG_DEBUG);
-        (void) dlopen_libselinux(LOG_DEBUG);
+        (void) DLOPEN_LIBMOUNT(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
+        (void) DLOPEN_LIBSECCOMP(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
+        (void) DLOPEN_LIBSELINUX(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
 
         r = cg_has_legacy();
         if (r < 0)
@@ -6156,6 +6275,10 @@ static int run(int argc, char *argv[]) {
                 arg_caps_retain &= ~(UINT64_C(1) << CAP_NET_BIND_SERVICE);
 
         r = verify_arguments();
+        if (r < 0)
+                goto finish;
+
+        r = split_boot_parameters();
         if (r < 0)
                 goto finish;
 

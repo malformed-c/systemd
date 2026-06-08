@@ -227,7 +227,7 @@ static int help(void) {
         if (r < 0)
                 return r;
 
-        assert_se(ELEMENTSOF(vtables) == 9);
+        assert_cc(ELEMENTSOF(vtables) == 9);
         (void) table_sync_column_widths(0, options, vtables[0], vtables[1], vtables[2],
                                         vtables[3], vtables[4], vtables[5], vtables[6],
                                         vtables[7], vtables[8]);
@@ -716,7 +716,7 @@ static int run(int argc, char *argv[]) {
                         return log_oom();
         }
 
-        return dispatch_verb_with_args(args, NULL);
+        return dispatch_verb(args, NULL);
 }
 
 DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE(run);

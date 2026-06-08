@@ -1251,8 +1251,7 @@ static int status_json_filter_links(sd_json_variant **configuration, char **link
                         return r;
         }
 
-        JSON_VARIANT_REPLACE(*configuration, TAKE_PTR(v));
-        return 0;
+        return json_variant_unref_and_replace(*configuration, v);
 }
 
 static int status_json_filter_fields(sd_json_variant **configuration, StatusMode mode) {
@@ -1281,8 +1280,7 @@ static int status_json_filter_fields(sd_json_variant **configuration, StatusMode
                         return r;
         }
 
-        JSON_VARIANT_REPLACE(*configuration, TAKE_PTR(v));
-        return 0;
+        return json_variant_unref_and_replace(*configuration, v);
 }
 
 static int format_dns_server_one(DNSConfiguration *configuration, DNSServer *s, char **ret) {
@@ -3763,7 +3761,7 @@ static int translate(const char *verb, const char *single_arg, char **args) {
         STRV_FOREACH(a, args)
                 *p++ = *a;
 
-        return dispatch_verb_with_args(fake, /* userdata= */ NULL);
+        return dispatch_verb(fake, /* userdata= */ NULL);
 }
 
 static int compat_main(char **args) {
@@ -3885,7 +3883,7 @@ static int run(int argc, char **argv) {
         if (compat)
                 return compat_main(args);
 
-        return dispatch_verb_with_args(args, /* userdata= */ NULL);
+        return dispatch_verb(args, /* userdata= */ NULL);
 }
 
 DEFINE_MAIN_FUNCTION(run);

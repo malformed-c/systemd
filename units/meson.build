@@ -605,6 +605,10 @@ units = [
           'symlinks' : ['sysinit.target.wants/'],
         },
         {
+          'file' : 'systemd-pcrlogin@.service.in',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+        },
+        {
           'file' : 'systemd-pcrphase-initrd.service.in',
           'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2', 'ENABLE_INITRD'],
           'symlinks' : ['initrd.target.wants/'],
@@ -785,7 +789,7 @@ units = [
           'symlinks' : ['system-install.target.wants/'],
         },
         {
-          'file' : 'systemd-sysupdate-reboot.service.in',
+          'file' : 'systemd-sysupdate-reboot.service',
           'conditions' : ['ENABLE_SYSUPDATE'],
         },
         {
@@ -793,7 +797,7 @@ units = [
           'conditions' : ['ENABLE_SYSUPDATE'],
         },
         {
-          'file' : 'systemd-sysupdate.service.in',
+          'file' : 'systemd-sysupdate.service',
           'conditions' : ['ENABLE_SYSUPDATE'],
         },
         {

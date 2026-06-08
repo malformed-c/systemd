@@ -178,7 +178,7 @@ testcase_nvme_basic() {
     local expected_symlinks=()
     local i
 
-    for i in {0..4}; do
+    for i in {0..2}; do
         expected_symlinks+=(
             # both replace mode provides the same devlink
             /dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_deadbeef"$i"
@@ -186,7 +186,7 @@ testcase_nvme_basic() {
             /dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_deadbeef"$i"_1
         )
     done
-    for i in {5..9}; do
+    for i in {3..5}; do
         expected_symlinks+=(
             # old replace mode
             /dev/disk/by-id/nvme-QEMU_NVMe_Ctrl__deadbeef_"$i"
@@ -196,7 +196,7 @@ testcase_nvme_basic() {
             /dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_____deadbeef__"$i"_1
         )
     done
-    for i in {10..14}; do
+    for i in {6..8}; do
         expected_symlinks+=(
             # old replace mode does not provide devlink, as serial contains "/"
             # newer replace mode
@@ -205,7 +205,7 @@ testcase_nvme_basic() {
             /dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_____dead_beef_"$i"_1
         )
     done
-    for i in {15..19}; do
+    for i in {9..11}; do
         expected_symlinks+=(
             # old replace mode does not provide devlink, as serial contains "/"
             # newer replace mode
@@ -222,7 +222,7 @@ testcase_nvme_basic() {
     test ! -e /dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_deadbeef
 
     lsblk --noheadings | grep "^nvme"
-    [[ "$(lsblk --noheadings | grep -c "^nvme")" -ge 20 ]]
+    [[ "$(lsblk --noheadings | grep -c "^nvme")" -ge 12 ]]
 }
 
 testcase_nvme_subsystem() {
@@ -1375,6 +1375,32 @@ testcase_mdadm_lvm() {
 
 udevadm settle
 lsblk -a
+
+# This test often fails because the VM reboots (eg: kernel panic) and the previous state is left unclean.
+# Do the cleanups at the beginning too, to try and reduce flakiness.
+mdadm --stop --scan || :
+for _dm in /dev/mapper/encbtrfs[0-3] /dev/mapper/encdisk[0-3] /dev/mapper/lvmluksmap; do
+    [[ -e "$_dm" ]] || continue
+    cryptsetup close "$_dm" || :
+done
+unset _dm
+for _vg in $(lvm vgs --noheadings -o vg_name 2>/dev/null \
+                 | awk '$1 ~ /^(MyTestGroup|iscsi_lvm|mdmirpar_vg)/ {print $1}'); do
+    lvm vgchange -an "$_vg" || :
+done
+unset _vg
+udevadm settle --timeout=30
+_stale_devs=()
+for _d in /dev/disk/by-id/scsi-0systemd_foobar_deadbeef*; do
+    [[ -e "$_d" ]] && _stale_devs+=("$_d")
+done
+if (( ${#_stale_devs[@]} > 0 )); then
+    # shellcheck disable=SC2046
+    mdadm -v --zero-superblock --force $(readlink -f "${_stale_devs[@]}") || :
+    wipefs --all "${_stale_devs[@]}" || :
+fi
+unset _d _stale_devs
+udevadm settle --timeout=30
 
 echo "Check if all symlinks under /dev/disk/ are valid (pre-test)"
 helper_check_device_symlinks

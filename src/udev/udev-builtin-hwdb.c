@@ -6,10 +6,10 @@
 #include "sd-hwdb.h"
 
 #include "alloc-util.h"
+#include "device-private.h"
 #include "device-util.h"
 #include "hwdb-util.h"
 #include "options.h"
-#include "parse-util.h"
 #include "string-util.h"
 #include "udev-builtin.h"
 
@@ -40,28 +40,25 @@ int udev_builtin_hwdb_lookup(
                         continue;
 
                 r = udev_builtin_add_property(event, key, value);
-                if (r < 0)
+                if (r == -ENOMEM)
                         return r;
-                n++;
+                if (r >= 0)
+                        n++;
         }
         return n;
 }
 
 static const char* modalias_usb(sd_device *dev, char *s, size_t size) {
-        const char *v, *p, *n = NULL;
-        uint16_t vn, pn;
+        const char *n = NULL;
+        uint16_t v, p;
 
-        if (sd_device_get_sysattr_value(dev, "idVendor", &v) < 0)
+        if (device_get_sysattr_u16_full(dev, "idVendor", 16, &v) < 0)
                 return NULL;
-        if (sd_device_get_sysattr_value(dev, "idProduct", &p) < 0)
+        if (device_get_sysattr_u16_full(dev, "idProduct", 16, &p) < 0)
                 return NULL;
-        if (safe_atoux16(v, &vn) < 0)
-                return NULL;
-        if (safe_atoux16(p, &pn) < 0)
-                return NULL;
-        (void) sd_device_get_sysattr_value(dev, "product", &n);
+        (void) device_get_sysattr_safe_string(dev, "product", &n);
 
-        (void) snprintf(s, size, "usb:v%04Xp%04X:%s", vn, pn, strempty(n));
+        (void) snprintf(s, size, "usb:v%04Xp%04X:%s", v, p, strempty(n));
         return s;
 }
 

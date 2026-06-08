@@ -9,7 +9,7 @@
 #include "build.h"
 #include "copy.h"
 #include "crypto-util.h"
-#include "efi-fundamental.h"
+#include "efi.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "format-table.h"
@@ -425,7 +425,7 @@ static int verb_sign(int argc, char *argv[], uintptr_t _data, void *userdata) {
         _cleanup_(iovec_done) struct iovec signed_attributes_signature = {};
         int r;
 
-        r = dlopen_libcrypto(LOG_ERR);
+        r = DLOPEN_LIBCRYPTO(LOG_ERR, SD_ELF_NOTE_DLOPEN_PRIORITY_REQUIRED);
         if (r < 0)
                 return r;
 
@@ -461,7 +461,7 @@ static int verb_sign(int argc, char *argv[], uintptr_t _data, void *userdata) {
                 if (arg_private_key_source_type == OPENSSL_KEY_SOURCE_FILE) {
                         r = parse_path_argument(arg_private_key, /* suppress_root= */ false, &arg_private_key);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to parse private key path %s: %m", arg_private_key);
+                                return r;
                 }
 
                 r = openssl_load_private_key(
@@ -730,7 +730,7 @@ static int run(int argc, char *argv[]) {
         if (r <= 0)
                 return r;
 
-        return dispatch_verb_with_args(args, NULL);
+        return dispatch_verb(args, NULL);
 }
 
 DEFINE_MAIN_FUNCTION(run);

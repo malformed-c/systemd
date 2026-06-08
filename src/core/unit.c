@@ -40,7 +40,7 @@
 #include "load-fragment.h"
 #include "log.h"
 #include "logarithm.h"
-#include "mkdir-label.h"
+#include "mkdir.h"
 #include "manager.h"
 #include "mount-util.h"
 #include "mountpoint-util.h"
@@ -1626,7 +1626,7 @@ static int unit_add_oomd_dependencies(Unit *u) {
         if (!c)
                 return 0;
 
-        bool wants_oomd = c->moom_swap == MANAGED_OOM_KILL || c->moom_mem_pressure == MANAGED_OOM_KILL;
+        bool wants_oomd = c->moom_swap == MANAGED_OOM_KILL || c->moom_mem_pressure == MANAGED_OOM_KILL || !strv_isempty(c->moom_rules);
         if (!wants_oomd)
                 return 0;
 
@@ -2338,7 +2338,7 @@ static void retroactively_stop_dependencies(Unit *u) {
 
 void unit_start_on_termination_deps(Unit *u, UnitDependencyAtom atom) {
         const char *dependency_name = NULL;
-        JobMode job_mode;
+        JobMode job_mode = _JOB_MODE_INVALID;
         unsigned n_jobs = 0;
         int r;
 

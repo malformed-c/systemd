@@ -12,6 +12,7 @@
 #include "bus-util.h"
 #include "bus-wait-for-jobs.h"
 #include "chase.h"
+#include "device-private.h"
 #include "device-util.h"
 #include "errno-util.h"
 #include "escape.h"
@@ -243,17 +244,14 @@ static int parse_argv(int argc, char *argv[], char ***remaining_args) {
                                 return r;
                         break;
 
-                OPTION_LONG("owner", "USER", "Add uid= and gid= options for USER"): {
-                        const char *user = opts.arg;
-
-                        r = get_user_creds(&user, &arg_uid, &arg_gid, NULL, NULL, 0);
+                OPTION_LONG("owner", "USER", "Add uid= and gid= options for USER"):
+                        r = get_user_creds(opts.arg, /* flags= */ 0, NULL, &arg_uid, &arg_gid, NULL, NULL);
                         if (r < 0)
                                 return log_error_errno(r,
                                                        r == -EBADMSG ? "UID or GID of user %s are invalid."
                                                                      : "Cannot use \"%s\" as owner: %m",
                                                        opts.arg);
                         break;
-                }
 
                 OPTION_LONG("fsck", "BOOL", "Run a file system check before mount"):
                         r = parse_boolean_argument("--fsck=", opts.arg, &arg_fsck);
@@ -840,7 +838,7 @@ static int find_loop_device(const char *backing_file, sd_device **ret) {
         FOREACH_DEVICE(e, dev) {
                 const char *s;
 
-                r = sd_device_get_sysattr_value(dev, "loop/backing_file", &s);
+                r = device_get_sysattr_safe_string(dev, "loop/backing_file", &s);
                 if (r < 0) {
                         log_device_debug_errno(dev, r, "Failed to read \"loop/backing_file\" sysattr, ignoring: %m");
                         continue;
@@ -1227,7 +1225,6 @@ static int acquire_description(sd_device *d) {
 }
 
 static int acquire_removable(sd_device *d) {
-        const char *v;
         int r;
 
         assert(d);
@@ -1237,8 +1234,13 @@ static int acquire_removable(sd_device *d) {
                 return 0;
 
         for (;;) {
-                if (sd_device_get_sysattr_value(d, "removable", &v) >= 0)
+                r = device_get_sysattr_bool(d, "removable");
+                if (r == 0)
+                        return 0; /* not a removable device */
+                if (r > 0)
                         break;
+                if (r != -ENOENT)
+                        return log_device_debug_errno(d, r, "Failed to read 'removable' sysattr: %m");
 
                 r = sd_device_get_parent(d, &d);
                 if (r == -ENODEV)
@@ -1250,9 +1252,6 @@ static int acquire_removable(sd_device *d) {
                 if (r <= 0)
                         return r;
         }
-
-        if (parse_boolean(v) <= 0)
-                return 0;
 
         log_debug("Discovered removable device.");
 

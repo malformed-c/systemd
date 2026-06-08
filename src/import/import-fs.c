@@ -17,7 +17,7 @@
 #include "install-file.h"
 #include "log.h"
 #include "main-func.h"
-#include "mkdir-label.h"
+#include "mkdir.h"
 #include "options.h"
 #include "parse-argument.h"
 #include "path-util.h"
@@ -370,11 +370,11 @@ static int parse_argv(int argc, char *argv[], char ***ret_args) {
                                 return log_error_errno(arg_class, "Failed to parse --class= argument: %s", opts.arg);
                         break;
 
-                OPTION_LONG("system", NULL, "Operate in per-system mode"):
+                OPTION_COMMON_SYSTEM:
                         arg_runtime_scope = RUNTIME_SCOPE_SYSTEM;
                         break;
 
-                OPTION_LONG("user", NULL, "Operate in per-user mode"):
+                OPTION_COMMON_USER:
                         arg_runtime_scope = RUNTIME_SCOPE_USER;
                         break;
                 }
@@ -400,7 +400,7 @@ static int run(int argc, char *argv[]) {
         if (r <= 0)
                 return r;
 
-        return dispatch_verb_with_args(args, NULL);
+        return dispatch_verb(args, NULL);
 }
 
 DEFINE_MAIN_FUNCTION(run);

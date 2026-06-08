@@ -188,7 +188,7 @@ static int is_tmpfs_with_noswap(dev_t devno) {
         _cleanup_(mnt_free_tablep) struct libmnt_table *table = NULL;
         int r;
 
-        r = dlopen_libmount(LOG_DEBUG);
+        r = DLOPEN_LIBMOUNT(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
         if (r < 0)
                 return r;
 
@@ -305,8 +305,7 @@ static int add_credentials_to_table(Table *t, bool encrypted) {
         return 1; /* Creds dir set */
 }
 
-VERB(verb_list, "list", NULL, VERB_ANY, 1, VERB_DEFAULT,
-     "Show list of passed credentials");
+VERB_DEFAULT_NOARG(verb_list, "list", "Show list of passed credentials");
 static int verb_list(int argc, char *argv[], uintptr_t _data, void *userdata) {
         _cleanup_(table_unrefp) Table *t = NULL;
         int r, q;
@@ -989,15 +988,14 @@ static int parse_argv(int argc, char *argv[], char ***ret_args) {
                         else if (streq(opts.arg, "self"))
                                 arg_uid = getuid();
                         else {
-                                const char *name = opts.arg;
-
                                 r = get_user_creds(
-                                                &name,
+                                                opts.arg,
+                                                /* flags= */ 0,
+                                                /* ret_username= */ NULL,
                                                 &arg_uid,
                                                 /* ret_gid= */ NULL,
                                                 /* ret_home= */ NULL,
-                                                /* ret_shell= */ NULL,
-                                                /* flags= */ 0);
+                                                /* ret_shell= */ NULL);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to resolve user '%s': %s",
                                                                opts.arg, STRERROR_USER(r));
@@ -1479,7 +1477,7 @@ static int run(int argc, char *argv[]) {
         if (arg_varlink)
                 return vl_server();
 
-        return dispatch_verb_with_args(args, NULL);
+        return dispatch_verb(args, NULL);
 }
 
 DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE(run);
