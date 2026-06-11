@@ -96,13 +96,14 @@ jobs:
             -Dstandalone-binaries=true \
             --buildtype=release
 
-      - name: Build only systemd-nspawn
+      - name: Build systemd-nspawn and systemd-mstack
         run: |
-          ninja -C build systemd-nspawn
+          ninja -C build systemd-nspawn systemd-mstack
 
       - name: Patch rpath
         run: |
           patchelf --set-rpath '$ORIGIN' build/systemd-nspawn
+          patchelf --set-rpath '$ORIGIN' build/systemd-mstack
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -113,4 +114,5 @@ jobs:
           # Uploads compiled binary to the release page
           files: |
             build/systemd-nspawn
+            build/systemd-mstack
             build/**/libsystemd-shared-*.so
