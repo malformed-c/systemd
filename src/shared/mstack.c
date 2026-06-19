@@ -714,10 +714,12 @@ static int fsconfig_add_layer(int sb_fd, const char *key, int layer_fd) {
         }
 
         r = RET_NERRNO(fsconfig(sb_fd, FSCONFIG_SET_FD, key, /* value= */ NULL, layer_fd));
-        if (r != -EBADF && !ERRNO_IS_NEG_NOT_SUPPORTED(r))
+        if (r != -EBADF && r != -EINVAL && !ERRNO_IS_NEG_NOT_SUPPORTED(r))
                 return r;
 
-        /* overlayfs learnt support for FSCONFIG_SET_FD only with linux 6.13, hence provide a fallback here via /proc/self/fd/ */
+        /* overlayfs learnt support for FSCONFIG_SET_FD only with linux 6.13. On kernels 6.5–6.12,
+         * the overlayfs parameter parser recognises the key but rejects the fd type with EINVAL.
+         * Fall back to the /proc/self/fd/ string path for all of these. */
 
         // FIXME: This compatibility code path shall be removed once kernel 6.13
         //        becomes the new minimal baseline
@@ -1162,7 +1164,10 @@ int mstack_bind_mounts(
                         return r;
         }
 
-        r = mstack_apply_attr(root_fd, MSTACK_ROOT, writable, flags);
+        /* When root/ provides the base rootfs and /usr is a separate overlay mount, keep
+         * root/ read-only even when rw/ exists — rw/ only makes the /usr overlay writable.
+         * Use --volatile for a writable root. */
+        r = mstack_apply_attr(root_fd, MSTACK_ROOT, writable && mstack->usr_mount_fd < 0, flags);
         if (r < 0)
                 return r;
 
