@@ -4005,14 +4005,10 @@ static int outer_child(
 
                 bool writable = mstack_has_writable_layers(mstack, 0);
 
-                /* Defer binds only if using an mstack root
-                 * AND any of volatile mode is enabled. */
-                if (IN_SET(arg_volatile_mode, VOLATILE_YES, VOLATILE_OVERLAY, VOLATILE_STATE)) {
-                        /* Defer all binds. */
-                        mstack_flags |= MSTACK_DEFER_MOUNT;
-
-                        log_debug("Detected combination of mstack and volatile flags, deferring all .mstack bind mounts.");
-                }
+                /* Always defer bind mounts to after mount_all(), so that API VFS
+                 * mounts (/proc, /sys, /dev, /run, /tmp) don't shadow mstack binds.
+                 * The root and /usr mounts are still attached immediately. */
+                mstack_flags |= MSTACK_DEFER_MOUNT;
 
                 if (writable && FLAGS_SET(arg_settings_mask, SETTING_READ_ONLY))
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
@@ -4352,8 +4348,9 @@ static int outer_child(
         if (r < 0)
                 return r;
 
-        /* Applying skipped mstack bind mounts. */
-        if (mstack && IN_SET(arg_volatile_mode, VOLATILE_YES, VOLATILE_OVERLAY, VOLATILE_STATE)) {
+        /* Apply deferred mstack bind mounts after mount_all() so they land on top
+         * of API VFS mounts rather than being shadowed by them. */
+        if (mstack) {
                 assert(arg_mstack);
 
                 r = apply_deferred_mstack_bind_mounts(mstack, directory, mstack_flags);
