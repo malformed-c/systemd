@@ -1157,11 +1157,32 @@ int mstack_bind_mounts(
                 log_debug("Attached mstack '/usr/' mount to '%s/usr/'.", where);
         }
 
-        /* Apply binds according to filter, deferring some or all if volatile is in use. */
         if (!FLAGS_SET(flags, MSTACK_DEFER_MOUNT)) {
                 r = mstack_apply_bind_mounts(mstack, root_fd, where, flags);
                 if (r < 0)
                         return r;
+        } else {
+                /* Pre-create bind mount target directories while root is still writable.
+                 * The actual mounts are deferred to after mount_all(), at which point the
+                 * root may already be read-only. Directories under paths that mount_all()
+                 * replaces (e.g. /run, /tmp) will be hidden, but the deferred apply
+                 * recreates them on the new writable mounts. */
+                FOREACH_ARRAY(m, mstack->mounts, mstack->n_mounts) {
+                        if (!IN_SET(m->mount_type, MSTACK_BIND, MSTACK_ROBIND) ||
+                            m == mstack->root_mount)
+                                continue;
+
+                        _cleanup_free_ char *filename = NULL;
+                        _cleanup_close_ int parent_fd = chase_and_open_parent_at(
+                                        root_fd, root_fd, m->where, CHASE_MKDIR_0755, &filename);
+                        if (parent_fd < 0)
+                                continue;
+
+                        _cleanup_close_ int subdir_fd = -EBADF;
+                        (void) chaseat(root_fd, parent_fd, filename,
+                                       CHASE_PROHIBIT_SYMLINKS|CHASE_MKDIR_0755|CHASE_MUST_BE_DIRECTORY,
+                                       /* ret_path= */ NULL, &subdir_fd);
+                }
         }
 
         /* When root/ provides the base rootfs and /usr is a separate overlay mount, keep
