@@ -33,6 +33,7 @@
 #include "constants.h"
 #include "copy.h"
 #include "coredump-util.h"
+#include "crypto-util.h"
 #include "cryptsetup-util.h"
 #include "dissect-image.h"
 #include "dynamic-user.h"
@@ -3718,8 +3719,9 @@ static int pin_rootfs(
         if (context->root_image) {
                 _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
 
-                r = path_pick(/* toplevel_path= */ NULL,
-                              /* toplevel_fd= */ AT_FDCWD,
+                r = path_pick(/* root_path= */ NULL,
+                              /* root_fd= */ AT_FDCWD,
+                              /* dir_fd= */ AT_FDCWD,
                               context->root_image,
                               pick_filter_image_raw,
                               ELEMENTSOF(pick_filter_image_raw),
@@ -3759,8 +3761,9 @@ static int pin_rootfs(
         if (context->root_directory) {
                 _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
 
-                r = path_pick(/* toplevel_path= */ NULL,
-                              /* toplevel_fd= */ AT_FDCWD,
+                r = path_pick(/* root_path= */ NULL,
+                              /* root_fd= */ AT_FDCWD,
+                              /* dir_fd= */ AT_FDCWD,
                               context->root_directory,
                               pick_filter_image_dir,
                               ELEMENTSOF(pick_filter_image_dir),
@@ -3788,8 +3791,9 @@ static int pin_rootfs(
         if (context->root_mstack) {
                 _cleanup_(pick_result_done) PickResult result = PICK_RESULT_NULL;
 
-                r = path_pick(/* toplevel_path= */ NULL,
-                              /* toplevel_fd= */ AT_FDCWD,
+                r = path_pick(/* root_path= */ NULL,
+                              /* root_fd= */ AT_FDCWD,
+                              /* dir_fd= */ AT_FDCWD,
                               context->root_mstack,
                               pick_filter_image_mstack,
                               /* n_filters= */ 1,
@@ -5642,8 +5646,10 @@ int exec_invoke(
 
         if (mpol_is_valid(numa_policy_get_type(&context->numa_policy))) {
                 r = apply_numa_policy(&context->numa_policy);
-                if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
+                if (r == -ENOSYS)
                         log_debug_errno(r, "NUMA support not available, ignoring.");
+                else if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
+                        log_warning_errno(r, "NUMA policy not supported by kernel, ignoring.");
                 else if (r < 0) {
                         *exit_status = EXIT_NUMA_POLICY;
                         return log_error_errno(r, "Failed to set NUMA memory policy: %m");
@@ -6002,6 +6008,8 @@ int exec_invoke(
         (void) DLOPEN_CRYPTSETUP(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
         (void) DLOPEN_LIBMOUNT(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
         (void) DLOPEN_LIBSECCOMP(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
+        /* Needed for userspace verity verification fallback */
+        (void) DLOPEN_LIBCRYPTO(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
 
         /* Let's now disable further dlopen()ing of libraries, since we are about to do namespace
          * shenanigans, and do not want to mix resources from host and namespace */

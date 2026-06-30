@@ -5,7 +5,7 @@
 msgid ""
 msgstr ""
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-30 00:13+0200\n"
+"POT-Creation-Date: 2026-06-01 11:49+0200\n"
 "PO-Revision-Date: 2026-06-07 14:00+0000\n"
 "Last-Translator: Anonymous <noreply@weblate.org>\n"
 "Language-Team: Uyghur <https://translate.fedoraproject.org/projects/systemd/"
@@ -336,7 +336,8 @@ msgstr "پارولنىڭ مۇددىتى توشتى، ئۆزگەرتىش زۆرۈ
 
 #: src/home/pam_systemd_home.c:1065
 msgid "Password is expired, but can't change, refusing login."
-msgstr "پارولنىڭ مۇددىتى توشقان، ئەمما ئۆزگەرتكىلى بولمايدۇ، كىرىش رەت قىلىندى."
+msgstr ""
+"پارولنىڭ مۇددىتى توشقان، ئەمما ئۆزگەرتكىلى بولمايدۇ، كىرىش رەت قىلىندى."
 
 #: src/home/pam_systemd_home.c:1069
 msgid "Password will expire soon, please change."
@@ -519,7 +520,8 @@ msgstr ""
 #: src/login/org.freedesktop.login1.policy:97
 msgid "Allow applications to inhibit system handling of the hibernate key"
 msgstr ""
-"ئەپنىڭ سىستېمىنىڭ ئۇزۇن ئۇخلاش كۇنۇپكىسىنى بىر تەرەپ قىلىشىنى توسۇشىغا يول قوي"
+"ئەپنىڭ سىستېمىنىڭ ئۇزۇن ئۇخلاش كۇنۇپكىسىنى بىر تەرەپ قىلىشىنى توسۇشىغا يول "
+"قوي"
 
 #: src/login/org.freedesktop.login1.policy:98
 msgid ""
@@ -587,7 +589,7 @@ msgstr "ئۈسكۈنىنى seat قا ئۇلاش ئۈچۈن دەلىللەش تە
 
 #: src/login/org.freedesktop.login1.policy:159
 msgid "Flush device to seat attachments"
-msgstr "ئۈسكۈنە بىلەن seat ئۇلىنىشىنى يېڭىلا"
+msgstr "ئۈسكۈنە بىلەن seat ئۇلىنىشىنى تازىلا"
 
 #: src/login/org.freedesktop.login1.policy:160
 msgid "Authentication is required to reset how devices are attached to seats."
@@ -727,7 +729,8 @@ msgstr "سىستېمىنى ئۇزۇن ئۇخلاشقا كىرگۈزۈش ئۈچۈ
 
 #: src/login/org.freedesktop.login1.policy:310
 msgid "Hibernate the system while other users are logged in"
-msgstr "باشقا ئىشلەتكۈچىلەر تىزىملاتقان ھالەتتە سىستېمىنى ئۇزۇن ئۇخلاشقا كىرگۈز"
+msgstr ""
+"باشقا ئىشلەتكۈچىلەر تىزىملاتقان ھالەتتە سىستېمىنى ئۇزۇن ئۇخلاشقا كىرگۈز"
 
 #: src/login/org.freedesktop.login1.policy:311
 msgid ""
@@ -751,22 +754,23 @@ msgstr ""
 
 #: src/login/org.freedesktop.login1.policy:332
 msgid "Manage active sessions, users and seats"
-msgstr "ئاكتىپ سۆھبەتلەر، ئىشلەتكۈچىلەر ۋە seats نى باشقۇر"
+msgstr "ئاكتىپ ئۆتكۈنچى ھالەتلەر، ئىشلەتكۈچىلەر ۋە seats نى باشقۇر"
 
 #: src/login/org.freedesktop.login1.policy:333
 msgid "Authentication is required to manage active sessions, users and seats."
 msgstr ""
-"ئاكتىپ سۆھبەتلەر، ئىشلەتكۈچىلەر ۋە seats نى باشقۇرۇش ئۈچۈن دەلىللەش تەلەپ "
-"قىلىنىدۇ."
+"ئاكتىپ ئۆتكۈنچى ھالەتلەر، ئىشلەتكۈچىلەر ۋە seats نى باشقۇرۇش ئۈچۈن دەلىللەش "
+"تەلەپ قىلىنىدۇ."
 
 #: src/login/org.freedesktop.login1.policy:342
 msgid "Lock or unlock active sessions"
-msgstr "ئاكتىپ سۆھبەتلەرنى قۇلۇپلا ياكى قۇلۇپنى ئاچ"
+msgstr "ئاكتىپ ئۆتكۈنچى ھالەتلەرنى قۇلۇپلا ياكى قۇلۇپنى ئاچ"
 
 #: src/login/org.freedesktop.login1.policy:343
 msgid "Authentication is required to lock or unlock active sessions."
 msgstr ""
-"ئاكتىپ سۆھبەتلەرنى قۇلۇپلاش ياكى قۇلۇپنى ئېچىش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
+"ئاكتىپ ئۆتكۈنچى ھالەتلەرنى قۇلۇپلاش ياكى قۇلۇپنى ئېچىش ئۈچۈن دەلىللەش تەلەپ "
+"قىلىنىدۇ."
 
 #: src/login/org.freedesktop.login1.policy:352
 msgid "Set the reboot \"reason\" in the kernel"
@@ -869,7 +873,8 @@ msgstr "يەرلىك كونتېينېردا pseudo TTY غا ئېرىش"
 #: src/machine/org.freedesktop.machine1.policy:65
 msgid ""
 "Authentication is required to acquire a pseudo TTY in a local container."
-msgstr "يەرلىك كونتېينېردا pseudo TTY غا ئېرىشىش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
+msgstr ""
+"يەرلىك كونتېينېردا pseudo TTY غا ئېرىشىش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
 
 #: src/machine/org.freedesktop.machine1.policy:74
 msgid "Acquire a pseudo TTY on the local host"
@@ -889,7 +894,8 @@ msgstr "يەرلىك مەۋھۇم ماشىنا ۋە كونتېينېرلارنى
 msgid ""
 "Authentication is required to manage local virtual machines and containers."
 msgstr ""
-"يەرلىك مەۋھۇم ماشىنا ۋە كونتېينېرلارنى باشقۇرۇش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
+"يەرلىك مەۋھۇم ماشىنا ۋە كونتېينېرلارنى باشقۇرۇش ئۈچۈن دەلىللەش تەلەپ "
+"قىلىنىدۇ."
 
 #: src/machine/org.freedesktop.machine1.policy:95
 msgid "Inspect local virtual machines and containers"
@@ -1086,16 +1092,16 @@ msgstr "تور ئۇلاش ئېغىزىنى قايتا سەپلەش ئۈچۈن د
 #: src/network/org.freedesktop.network1.policy:187
 msgid "Specify whether persistent storage for systemd-networkd is available"
 msgstr ""
-"systemd-networkd ئۈچۈن تۇراقلىق ساقلاش ئىشلەتكىلى بولىدىغان-بولمايدىغانلىقىنى "
-"بەلگىلە"
+"systemd-networkd ئۈچۈن تۇراقلىق ساقلاش ئىشلەتكىلى بولىدىغان-"
+"بولمايدىغانلىقىنى بەلگىلە"
 
 #: src/network/org.freedesktop.network1.policy:188
 msgid ""
 "Authentication is required to specify whether persistent storage for systemd-"
 "networkd is available."
 msgstr ""
-"systemd-networkd ئۈچۈن تۇراقلىق ساقلاش ئىشلەتكىلى بولىدىغان-بولمايدىغانلىقىنى "
-"بەلگىلەش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
+"systemd-networkd ئۈچۈن تۇراقلىق ساقلاش ئىشلەتكىلى بولىدىغان-"
+"بولمايدىغانلىقىنى بەلگىلەش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
 
 #: src/network/org.freedesktop.network1.policy:198
 msgid "Manage network links"
@@ -1379,7 +1385,8 @@ msgstr ""
 
 #: src/core/dbus-unit.c:679
 msgid "Authentication is required to set properties on '$(unit)'."
-msgstr "'$(unit)' ئۈستىدىكى خاسلىقلارنى بەلگىلەش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
+msgstr ""
+"'$(unit)' ئۈستىدىكى خاسلىقلارنى بەلگىلەش ئۈچۈن دەلىللەش تەلەپ قىلىنىدۇ."
 
 #: src/core/dbus-unit.c:776
 msgid ""
@@ -1396,15 +1403,21 @@ msgstr ""
 "'$(unit)' بىرىكىنىڭ جەريانلىرىنى توڭلىتىش ياكى ئېچىش ئۈچۈن دەلىللەش تەلەپ "
 "قىلىنىدۇ."
 
-#: src/shared/libfido2-util.c:497 src/shared/libfido2-util.c:554
+#: src/shared/libfido2-util.c:500 src/shared/libfido2-util.c:557
 msgid "Please confirm presence on security token to unlock."
 msgstr ""
 
-#: src/shared/libfido2-util.c:513
+#: src/shared/libfido2-util.c:516
 msgid "Please verify user on security token to unlock."
 msgstr ""
 
-#: src/shared/libfido2-util.c:926
+#: src/shared/libfido2-util.c:936
+#, c-format
+msgid ""
+"Please enter security token PIN (remaining attempts before lock-out: %d):"
+msgstr ""
+
+#: src/shared/libfido2-util.c:948
 msgid "Please enter security token PIN:"
 msgstr ""
 

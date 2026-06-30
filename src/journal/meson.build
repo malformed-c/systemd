@@ -34,6 +34,7 @@ journalctl_sources = files(
         'journalctl-authenticate.c',
         'journalctl-catalog.c',
         'journalctl-filter.c',
+        'journalctl-metrics.c',
         'journalctl-misc.c',
         'journalctl-show.c',
         'journalctl-util.c',
@@ -93,6 +94,7 @@ executables += [
                 'link_with' : journalctl_link_with,
                 'dependencies' : [
                         liblz4_cflags,
+                        libopenssl_cflags,
                         libxz_cflags,
                         libzstd_cflags,
                 ],

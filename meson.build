@@ -78,6 +78,9 @@ conf.set10('FUZZ_USE_SIZE_LIMIT', fuzzer_build)
 # We'll set this to '1' for EFI builds in a different place.
 conf.set10('SD_BOOT', false)
 
+link_executor_shared = get_option('link-executor-shared')
+conf.set10('BUILD_EXECUTOR_SINGLE', link_executor_shared == 'single')
+
 # Create a title-less summary section early, so it ends up first in the output.
 # More items are added later after they have been detected.
 summary({
@@ -508,6 +511,11 @@ possible_cc_flags = [
 
 if get_option('mode') == 'developer'
         possible_cc_flags += '-fno-omit-frame-pointer'
+endif
+
+# Work around stack alignment issues observed with musl + libucontext on i386.
+if get_option('libc') == 'musl' and host_machine.cpu_family() == 'x86'
+        possible_cc_flags += '-mstackrealign'
 endif
 
 add_project_arguments(
@@ -1003,13 +1011,6 @@ endif
 
 libm = cc.find_library('m')
 
-# Header presence check only — dgettext itself is resolved via dlopen_libintl() at runtime, so we never
-# link against libintl. On glibc dgettext lives in libc; on musl gettext-dev provides libintl.h alongside
-# libintl.so.8 which we dlopen() if present.
-if not cc.has_header('libintl.h')
-        error('libintl.h not found (install gettext / gettext-dev)')
-endif
-
 # On some architectures, libatomic is required. But on some installations,
 # it is found, but actual linking fails. So let's try to use it opportunistically.
 # If it is installed, but not needed, it will be dropped because of --as-needed.
@@ -1198,8 +1199,9 @@ libqrencode = dependency('libqrencode',
 libqrencode_cflags = libqrencode.partial_dependency(includes: true, compile_args: true)
 conf.set10('HAVE_QRENCODE', libqrencode.found())
 
+feature = get_option('gcrypt')
 libgcrypt = dependency('libgcrypt',
-                       required : get_option('gcrypt'))
+                       required : feature.disabled() ? feature : false)
 conf.set10('HAVE_GCRYPT', libgcrypt.found())
 if libgcrypt.found()
         libgcrypt_cflags = libgcrypt.partial_dependency(includes: true, compile_args: true)
@@ -1805,8 +1807,7 @@ if static_libsystemd != 'false'
                 install_tag: 'libsystemd',
                 install_dir : libdir,
                 pic : static_libsystemd_pic,
-                dependencies : [libgcrypt_cflags,
-                                liblz4_cflags,
+                dependencies : [liblz4_cflags,
                                 libm,
                                 libucontext,
                                 libxz_cflags,
@@ -2449,6 +2450,7 @@ subdir('test')
 #####################################################################
 
 subdir('docs/var-log')
+subdir('hostname-wordlist')
 subdir('hwdb.d')
 subdir('man')
 subdir('modprobe.d')

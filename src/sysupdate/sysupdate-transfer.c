@@ -35,6 +35,7 @@
 #include "strv.h"
 #include "sync-util.h"
 #include "sysupdate.h"
+#include "sysupdate-cleanup.h"
 #include "sysupdate-feature.h"
 #include "sysupdate-instance.h"
 #include "sysupdate-pattern.h"
@@ -121,11 +122,12 @@ static int config_parse_protect_version(
 
         _cleanup_free_ char *resolved = NULL;
         char ***protected_versions = ASSERT_PTR(data);
+        Transfer *t = ASSERT_PTR(userdata);
         int r;
 
         assert(rvalue);
 
-        r = specifier_printf(rvalue, NAME_MAX, specifier_table, arg_root, NULL, &resolved);
+        r = specifier_printf(rvalue, NAME_MAX, specifier_table, t->context->root, NULL, &resolved);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to expand specifiers in ProtectVersion=, ignoring: %s", rvalue);
@@ -159,11 +161,12 @@ static int config_parse_min_version(
 
         _cleanup_free_ char *resolved = NULL;
         char **version = ASSERT_PTR(data);
+        Transfer *t = ASSERT_PTR(userdata);
         int r;
 
         assert(rvalue);
 
-        r = specifier_printf(rvalue, NAME_MAX, specifier_table, arg_root, NULL, &resolved);
+        r = specifier_printf(rvalue, NAME_MAX, specifier_table, t->context->root, NULL, &resolved);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to expand specifiers in MinVersion=, ignoring: %s", rvalue);
@@ -191,6 +194,7 @@ static int config_parse_url_specifiers(
                 void *data,
                 void *userdata) {
         char ***s = ASSERT_PTR(data);
+        Transfer *t = ASSERT_PTR(userdata);
         _cleanup_free_ char *resolved = NULL;
         int r;
 
@@ -201,7 +205,7 @@ static int config_parse_url_specifiers(
                 return 0;
         }
 
-        r = specifier_printf(rvalue, NAME_MAX, specifier_table, arg_root, NULL, &resolved);
+        r = specifier_printf(rvalue, NAME_MAX, specifier_table, t->context->root, NULL, &resolved);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to expand specifiers in %s=, ignoring: %s", lvalue, rvalue);
@@ -235,11 +239,12 @@ static int config_parse_current_symlink(
 
         _cleanup_free_ char *resolved = NULL;
         char **current_symlink = ASSERT_PTR(data);
+        Transfer *t = ASSERT_PTR(userdata);
         int r;
 
         assert(rvalue);
 
-        r = specifier_printf(rvalue, NAME_MAX, specifier_table, arg_root, NULL, &resolved);
+        r = specifier_printf(rvalue, NAME_MAX, specifier_table, t->context->root, NULL, &resolved);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to expand specifiers in CurrentSymlink=, ignoring: %s", rvalue);
@@ -306,6 +311,7 @@ static int config_parse_resource_pattern(
                 void *userdata) {
 
         char ***patterns = ASSERT_PTR(data);
+        Transfer *t = ASSERT_PTR(userdata);
         int r;
 
         assert(rvalue);
@@ -327,7 +333,7 @@ static int config_parse_resource_pattern(
                 if (r == 0)
                         break;
 
-                r = specifier_printf(word, NAME_MAX, specifier_table, arg_root, NULL, &resolved);
+                r = specifier_printf(word, NAME_MAX, specifier_table, t->context->root, NULL, &resolved);
                 if (r < 0) {
                         log_syntax(unit, LOG_WARNING, filename, line, r,
                                    "Failed to expand specifiers in MatchPattern=, ignoring: %s", rvalue);
@@ -360,6 +366,7 @@ static int config_parse_resource_path(
                 void *userdata) {
         _cleanup_free_ char *resolved = NULL;
         Resource *rr = ASSERT_PTR(data);
+        Transfer *t = ASSERT_PTR(userdata);
         int r;
 
         assert(rvalue);
@@ -370,7 +377,7 @@ static int config_parse_resource_path(
                 return 0;
         }
 
-        r = specifier_printf(rvalue, PATH_MAX-1, specifier_table, arg_root, NULL, &resolved);
+        r = specifier_printf(rvalue, PATH_MAX-1, specifier_table, t->context->root, NULL, &resolved);
         if (r < 0) {
                 log_syntax(unit, LOG_WARNING, filename, line, r,
                            "Failed to expand specifiers in Path=, ignoring: %s", rvalue);
@@ -548,16 +555,16 @@ int transfer_read_definition(Transfer *t, const char *path, const char **dirs, H
                         STRV_MAKE_CONST(path),
                         dirs,
                         strjoina(filename, ".d"),
-                        arg_root,
+                        t->context->root,
                         /* root_fd= */ -EBADF,
                         "Transfer\0"
                         "Source\0"
                         "Target\0",
                         config_item_table_lookup, table,
                         CONFIG_PARSE_WARN,
-                        /* userdata= */ NULL,
-                        /* stats_by_path= */ NULL,
-                        /* drop_in_files= */ NULL);
+                        t,
+                        /* ret_stats_by_path= */ NULL,
+                        /* ret_drop_in_files= */ NULL);
         if (r < 0)
                 return r;
 
@@ -612,7 +619,7 @@ int transfer_read_definition(Transfer *t, const char *path, const char **dirs, H
                 return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
                                   "Source specification lacks Path=.");
 
-        if (t->source.path_relative_to == PATH_RELATIVE_TO_EXPLICIT && !arg_transfer_source)
+        if (t->source.path_relative_to == PATH_RELATIVE_TO_EXPLICIT && !t->context->transfer_source)
                 return log_syntax(NULL, LOG_ERR, path, 1, SYNTHETIC_ERRNO(EINVAL),
                                   "PathRelativeTo=explicit requires --transfer-source= to be specified.");
 
@@ -681,7 +688,7 @@ int transfer_resolve_paths(
 
         assert(t);
 
-        r = resource_resolve_path(&t->source, root, arg_transfer_source, node);
+        r = resource_resolve_path(&t->source, root, t->context->transfer_source, node);
         if (r < 0)
                 return r;
 
@@ -837,7 +844,7 @@ int transfer_vacuum(
 
                 r = transfer_instance_vacuum(t, instance);
                 if (r < 0)
-                        return 0;
+                        return r;
 
                 instance_free(instance);
                 memmove(t->target.instances + i, t->target.instances + i + 1, (t->target.n_instances - i - 1) * sizeof(Instance*));
@@ -848,7 +855,7 @@ int transfer_vacuum(
 
         /* Second, calculate how many instances to keep, based on the instance limit — but keep at least one */
 
-        instances_max = arg_instances_max != UINT64_MAX ? arg_instances_max : t->instances_max;
+        instances_max = t->context->instances_max != UINT64_MAX ? t->context->instances_max : t->instances_max;
         assert(instances_max >= 1);
         if (instances_max == UINT64_MAX) /* Keep infinite instances? */
                 limit = UINT64_MAX;
@@ -936,7 +943,7 @@ int transfer_vacuum(
 
                 r = transfer_instance_vacuum(t, oldest);
                 if (r < 0)
-                        return 0;
+                        return r;
 
                 instance_free(oldest);
                 memmove(t->target.instances + p, t->target.instances + p + 1, (t->target.n_instances - p - 1) * sizeof(Instance*));
@@ -1368,7 +1375,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                                SYSTEMD_IMPORT_PATH,
                                                "raw",
                                                "--direct",          /* just copy/unpack the specified file, don't do anything else */
-                                               arg_sync ? "--sync=yes" : "--sync=no",
+                                               t->context->sync ? "--sync=yes" : "--sync=no",
                                                i->path,
                                                t->temporary_partial_path),
                                         t, i, cb, userdata);
@@ -1385,7 +1392,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                                "--direct",          /* just copy/unpack the specified file, don't do anything else */
                                                "--offset", offset,
                                                "--size-max", max_size,
-                                               arg_sync ? "--sync=yes" : "--sync=no",
+                                               t->context->sync ? "--sync=yes" : "--sync=no",
                                                i->path,
                                                t->target.path),
                                         t, i, cb, userdata);
@@ -1408,7 +1415,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                        SYSTEMD_IMPORT_FS_PATH,
                                        "run",
                                        "--direct",          /* just untar the specified file, don't do anything else */
-                                       arg_sync ? "--sync=yes" : "--sync=no",
+                                       t->context->sync ? "--sync=yes" : "--sync=no",
                                        t->target.type == RESOURCE_SUBVOLUME ? "--btrfs-subvol=yes" : "--btrfs-subvol=no",
                                        i->path,
                                        t->temporary_partial_path),
@@ -1425,7 +1432,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                        SYSTEMD_IMPORT_PATH,
                                        "tar",
                                        "--direct",          /* just untar the specified file, don't do anything else */
-                                       arg_sync ? "--sync=yes" : "--sync=no",
+                                       t->context->sync ? "--sync=yes" : "--sync=no",
                                        t->target.type == RESOURCE_SUBVOLUME ? "--btrfs-subvol=yes" : "--btrfs-subvol=no",
                                        i->path,
                                        t->temporary_partial_path),
@@ -1446,7 +1453,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                                "raw",
                                                "--direct",          /* just download the specified URL, don't download anything else */
                                                "--verify", digest,  /* validate by explicit SHA256 sum */
-                                               arg_sync ? "--sync=yes" : "--sync=no",
+                                               t->context->sync ? "--sync=yes" : "--sync=no",
                                                i->path,
                                                t->temporary_partial_path),
                                         t, i, cb, userdata);
@@ -1464,7 +1471,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                                "--verify", digest,      /* validate by explicit SHA256 sum */
                                                "--offset", offset,
                                                "--size-max", max_size,
-                                               arg_sync ? "--sync=yes" : "--sync=no",
+                                               t->context->sync ? "--sync=yes" : "--sync=no",
                                                i->path,
                                                t->target.path),
                                         t, i, cb, userdata);
@@ -1486,7 +1493,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                                        "--direct",          /* just download the specified URL, don't download anything else */
                                        "--verify", digest,  /* validate by explicit SHA256 sum */
                                        t->target.type == RESOURCE_SUBVOLUME ? "--btrfs-subvol=yes" : "--btrfs-subvol=no",
-                                       arg_sync ? "--sync=yes" : "--sync=no",
+                                       t->context->sync ? "--sync=yes" : "--sync=no",
                                        i->path,
                                        t->temporary_partial_path),
                                 t, i, cb, userdata);
@@ -1527,7 +1534,7 @@ int transfer_acquire_instance(Transfer *t, Instance *i, InstanceMetadata *f, Tra
                 }
 
                 /* Synchronize */
-                if (arg_sync && need_sync) {
+                if (t->context->sync && need_sync) {
                         if (t->target.type == RESOURCE_REGULAR_FILE)
                                 r = fsync_path_and_parent_at(AT_FDCWD, t->temporary_partial_path);
                         else {
@@ -1672,6 +1679,8 @@ int transfer_install_instance(
                          resource_type_to_string(t->target.type));
 
                 t->temporary_pending_path = mfree(t->temporary_pending_path);
+
+                (void) context_installdb_record(t->context, t->target.path, t->target.patterns);
         }
 
         if (t->final_partition_label) {

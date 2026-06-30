@@ -304,6 +304,14 @@ units = [
           'symlinks' : ['sockets.target.wants/'],
         },
         {
+          'file' : 'systemd-sysupdate-notify-bootctl@.service',
+          'conditions' : ['ENABLE_BOOTLOADER'],
+        },
+        {
+          'file' : 'systemd-sysupdate-notify-bootctl.socket',
+          'conditions' : ['ENABLE_BOOTLOADER'],
+        },
+        {
           'file' : 'systemd-confext.service',
           'conditions' : ['ENABLE_SYSEXT'],
         },
@@ -330,6 +338,20 @@ units = [
           'symlinks' : ['sockets.target.wants/'],
         },
         { 'file' : 'systemd-creds@.service' },
+        {
+          'file' : 'systemd-cryptenroll.socket',
+          'conditions' : ['HAVE_LIBCRYPTSETUP'],
+          'symlinks' : ['sockets.target.wants/'],
+        },
+        {
+          'file' : 'systemd-cryptenroll@.service',
+          'conditions' : ['HAVE_LIBCRYPTSETUP'],
+        },
+        {
+          'file' : 'systemd-cryptenroll-firstboot.service',
+          'conditions' : ['HAVE_LIBCRYPTSETUP', 'ENABLE_INITRD'],
+          'symlinks' : ['initrd.target.wants/'],
+        },
         { 'file' : 'systemd-exit.service' },
         { 'file' : 'systemd-factory-reset@.service.in' },
         {
@@ -414,6 +436,14 @@ units = [
           'conditions' : ['ENABLE_IMDS'],
         },
         {
+          'file' : 'systemd-imds-metrics.socket',
+          'conditions' : ['ENABLE_IMDS'],
+        },
+        {
+          'file' : 'systemd-imds-metrics@.service.in',
+          'conditions' : ['ENABLE_IMDS'],
+        },
+        {
           'file' : 'systemd-importd.service.in',
           'conditions' : ['ENABLE_IMPORTD'],
           'symlinks' : ['dbus-org.freedesktop.import1.service'],
@@ -465,6 +495,8 @@ units = [
           'file' : 'systemd-journalctl.socket',
           'symlinks' : ['sockets.target.wants/'],
         },
+        { 'file' : 'systemd-journalctl-metrics@.service' },
+        { 'file' : 'systemd-journalctl-metrics.socket' },
         { 'file' : 'systemd-journald-audit.socket' },
         {
           'file' : 'systemd-journald-dev-log.socket',
@@ -502,6 +534,10 @@ units = [
         {
           'file' : 'systemd-machine-id-commit.service',
           'symlinks' : ['sysinit.target.wants/'],
+        },
+        {
+          'file' : 'systemd-machine-tag@.service',
+          'conditions' : ['ENABLE_HOSTNAMED'],
         },
         {
           'file' : 'systemd-machined.service.in',
@@ -633,6 +669,8 @@ units = [
           'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
           'symlinks' : ['sysinit.target.wants/'],
         },
+        { 'file' : 'systemd-report.socket' },
+        { 'file' : 'systemd-report@.service.in' },
         { 'file' : 'systemd-report-basic.socket' },
         { 'file' : 'systemd-report-basic@.service.in' },
         {
@@ -691,6 +729,14 @@ units = [
           'symlinks' : ['sockets.target.wants/'],
         },
         {
+          'file' : 'systemd-sysupdate-notify-pcrlock@.service.in',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+        },
+        {
+          'file' : 'systemd-sysupdate-notify-pcrlock.socket',
+          'conditions' : ['ENABLE_BOOTLOADER', 'HAVE_OPENSSL', 'HAVE_TPM2'],
+        },
+        {
           'file' : 'systemd-portabled.service.in',
           'conditions' : ['ENABLE_PORTABLED'],
           'symlinks' : ['dbus-org.freedesktop.portable1.service'],
@@ -731,6 +777,18 @@ units = [
         },
         { 'file' : 'systemd-report-cgroup.socket' },
         { 'file' : 'systemd-report-cgroup@.service.in' },
+        { 'file' : 'systemd-report-files.socket' },
+        { 'file' : 'systemd-report-files@.service.in' },
+        {
+          'file' : 'systemd-report-sign-plain.socket',
+          'conditions' : ['HAVE_OPENSSL'],
+        },
+        {
+          'file' : 'systemd-report-sign-plain@.service.in',
+          'conditions' : ['HAVE_OPENSSL'],
+        },
+        { 'file' : 'systemd-report-sign-tsm.socket' },
+        { 'file' : 'systemd-report-sign-tsm@.service.in' },
         {
           'file' : 'systemd-resolved.service.in',
           'conditions' : ['ENABLE_RESOLVE'],
@@ -780,6 +838,14 @@ units = [
           'symlinks' : ['sockets.target.wants/'],
         },
         {
+          'file' : 'systemd-sysupdate-notify-sysext@.service',
+          'conditions' : ['ENABLE_SYSEXT'],
+        },
+        {
+          'file' : 'systemd-sysupdate-notify-sysext.socket',
+          'conditions' : ['ENABLE_SYSEXT'],
+        },
+        {
           'file' : 'systemd-sysext@.service',
           'conditions' : ['ENABLE_SYSEXT'],
         },
@@ -797,12 +863,23 @@ units = [
           'conditions' : ['ENABLE_SYSUPDATE'],
         },
         {
-          'file' : 'systemd-sysupdate.service',
+          'file' : 'systemd-sysupdate-update.service',
+          'conditions' : ['ENABLE_SYSUPDATE'],
+          'symlinks' : ['systemd-sysupdate.service'],  # compatibility after rename
+        },
+        {
+          'file' : 'systemd-sysupdate@.service',
           'conditions' : ['ENABLE_SYSUPDATE'],
         },
         {
-          'file' : 'systemd-sysupdate.timer',
+          'file' : 'systemd-sysupdate.socket',
           'conditions' : ['ENABLE_SYSUPDATE'],
+          'symlinks' : ['sockets.target.wants/'],
+        },
+        {
+          'file' : 'systemd-sysupdate-update.timer',
+          'conditions' : ['ENABLE_SYSUPDATE'],
+          'symlinks' : ['systemd-sysupdate.timer'],  # compatibility after rename
         },
         {
           'file' : 'systemd-sysupdated.service.in',

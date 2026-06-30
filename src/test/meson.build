@@ -114,6 +114,7 @@ simple_tests += files(
         'test-fstab-util.c',
         'test-glob-util.c',
         'test-gpt.c',
+        'test-group-record-nss.c',
         'test-gunicode.c',
         'test-hash-funcs.c',
         'test-hexdecoct.c',
@@ -125,6 +126,7 @@ simple_tests += files(
         'test-import-util.c',
         'test-in-addr-prefix-util.c',
         'test-in-addr-util.c',
+        'test-initrd-cpio.c',
         'test-install-file.c',
         'test-install-root.c',
         'test-io-util.c',
@@ -221,6 +223,7 @@ simple_tests += files(
         'test-unaligned.c',
         'test-unit-file.c',
         'test-user-record.c',
+        'test-user-record-nss.c',
         'test-user-util.c',
         'test-utf8.c',
         'test-verbs.c',
@@ -297,10 +300,14 @@ executables += [
                 'type' : 'manual',
         },
         test_template + {
-                'sources' : files('test-dlopen-so.c'),
+                'sources' : files(
+                        'test-dlopen-so.c',
+                        'gcrypt-util.c',
+                ),
                 'dependencies' : [
                         libblkid_cflags,
                         libfdisk_cflags,
+                        libgcrypt_cflags,
                         libgnutls_cflags,
                         libkmod_cflags,
                         libmicrohttpd_cflags,
@@ -332,6 +339,18 @@ executables += [
                 'sources' : files('test-fdstore.c'),
                 'link_with' : libsystemd,
                 'type' : 'manual',
+        },
+        test_template + {
+                'sources' : files(
+                        'test-fsprg.c',
+                        'fsprg.c',
+                        'gcrypt-util.c',
+                ),
+                'dependencies' : [
+                        libgcrypt_cflags,
+                        libopenssl_cflags,
+                ],
+                'conditions' : ['HAVE_OPENSSL'],
         },
         test_template + {
                 'sources' : files(
