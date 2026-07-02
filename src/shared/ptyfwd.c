@@ -968,20 +968,24 @@ int pty_forward_new(
                         return r;
         }
 
-        if (FLAGS_SET(flags, PTY_FORWARD_READ_ONLY))
-                f->output_fd = STDOUT_FILENO;
-        else {
-                /* If we shall be invoked in interactive mode, let's switch on non-blocking mode, so that we
-                 * never end up staving one direction while we block on the other. However, let's be careful
-                 * here and not turn on O_NONBLOCK for stdin/stdout directly, but of reopened copies of
-                 * them. This has two advantages: when we are killed abruptly the stdin/stdout fds won't be
-                 * left in O_NONBLOCK state for the next process using them. In addition, if some process
-                 * running in the background wants to continue writing to our stdout it can do so without
-                 * being confused by O_NONBLOCK.
-                 * We keep O_APPEND (if present) on the output FD and (try to) keep current file position on
-                 * both input and output FD (principle of least surprise).
-                 */
+        /* If we shall be invoked in interactive mode, let's switch on non-blocking mode, so that we
+         * never end up staving one direction while we block on the other. However, let's be careful
+         * here and not turn on O_NONBLOCK for stdin/stdout directly, but of reopened copies of
+         * them. This has two advantages: when we are killed abruptly the stdin/stdout fds won't be
+         * left in O_NONBLOCK state for the next process using them. In addition, if some process
+         * running in the background wants to continue writing to our stdout it can do so without
+         * being confused by O_NONBLOCK.
+         * We keep O_APPEND (if present) on the output FD and (try to) keep current file position on
+         * both input and output FD (principle of least surprise).
+         *
+         * Note this applies to the output side regardless of PTY_FORWARD_READ_ONLY: do_shovel()'s
+         * stdout write always treats EAGAIN as expected backpressure, which requires stdout to
+         * actually be non-blocking. Without it, a stalled peer on the other end of our stdout (e.g. a
+         * saturated journal stream socket) would block this write() synchronously, and since that
+         * happens on the same event loop that reads the PTY master, it would stall master reads too.
+         */
 
+        if (!FLAGS_SET(flags, PTY_FORWARD_READ_ONLY)) {
                 f->input_fd = fd_reopen_propagate_append_and_position(
                                 STDIN_FILENO, O_RDONLY|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
                 if (f->input_fd < 0) {
@@ -996,20 +1000,20 @@ int pty_forward_new(
                         f->input_fd = STDIN_FILENO;
                 } else
                         f->close_input_fd = true;
-
-                f->output_fd = fd_reopen_propagate_append_and_position(
-                                STDOUT_FILENO, O_WRONLY|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
-                if (f->output_fd < 0) {
-                        log_debug_errno(f->output_fd, "Failed to reopen stdout, using original fd: %m");
-
-                        r = fd_nonblock(STDOUT_FILENO, true);
-                        if (r < 0)
-                                return r;
-
-                        f->output_fd = STDOUT_FILENO;
-                } else
-                        f->close_output_fd = true;
         }
+
+        f->output_fd = fd_reopen_propagate_append_and_position(
+                        STDOUT_FILENO, O_WRONLY|O_CLOEXEC|O_NOCTTY|O_NONBLOCK);
+        if (f->output_fd < 0) {
+                log_debug_errno(f->output_fd, "Failed to reopen stdout, using original fd: %m");
+
+                r = fd_nonblock(STDOUT_FILENO, true);
+                if (r < 0)
+                        return r;
+
+                f->output_fd = STDOUT_FILENO;
+        } else
+                f->close_output_fd = true;
 
         r = fd_nonblock(master, true);
         if (r < 0)
