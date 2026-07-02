@@ -12,7 +12,8 @@ typedef enum MStackFlags {
 } MStackFlags;
 
 typedef enum MStackMountType {
-        MSTACK_ROOT,     /* optional "root" entry used as root, with the layer@/rw layers only used for /usr/ */
+        MSTACK_ROOT,     /* optional "root" entry used as the base (bottommost) layer of the overlayfs
+                          * stack when layer@/rw are also present, or as the root directly on its own */
         MSTACK_LAYER,    /* "layer@…" entries that are the lower (read-only) layers of an overlayfs stack */
         MSTACK_RW,       /* "rw" entry that is the upper (writable) layer of an overlayfs stack (contains two subdirs: 'data' + 'work') */
         MSTACK_BIND,     /* "bind@…" entries that are (writable) bind mounted on top of the overlayfs */
@@ -40,13 +41,11 @@ typedef struct MStack {
         bool has_overlayfs;       /* Indicates whether we need overlayfs (i.e. if there are more than a single layer */
         MStackMount *root_mount;  /* If there's a MOUNT_BIND/MOUNT_ROBIND/MOUNT_ROOT mount, this points to it */
         int root_mount_fd;
-        int usr_mount_fd;
 } MStack;
 
 #define MSTACK_INIT                             \
         (MStack) {                              \
                 .root_mount_fd = -EBADF,        \
-                .usr_mount_fd = -EBADF,         \
         }
 
 MStack* mstack_free(MStack *mstack);
