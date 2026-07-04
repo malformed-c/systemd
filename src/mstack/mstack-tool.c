@@ -38,10 +38,6 @@ static ImagePolicy *arg_image_policy = NULL;
 static ImageFilter *arg_image_filter = NULL;
 static uid_t arg_uid_shift = UID_INVALID;
 
-/* Fixed idmap range applied together with --uid-shift=, matching the single-userns-per-container
- * allocation size used throughout the rest of the mstack/nspawn userns machinery. */
-#define MSTACK_UID_SHIFT_RANGE UINT32_C(65536)
-
 STATIC_DESTRUCTOR_REGISTER(arg_what, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_where, freep);
 STATIC_DESTRUCTOR_REGISTER(arg_image_policy, image_policy_freep);
@@ -346,21 +342,10 @@ static int mount_mstack(void) {
                         arg_image_policy,
                         arg_image_filter,
                         arg_mstack_flags,
+                        arg_uid_shift,
                         /* ret_root_fd= */ NULL);
          if (r < 0)
                  return log_error_errno(r, "Failed to apply .mstack/ directory '%s': %m", arg_what);
-
-        if (uid_is_valid(arg_uid_shift)) {
-                r = remount_idmap(
-                                STRV_MAKE(arg_where),
-                                arg_uid_shift,
-                                MSTACK_UID_SHIFT_RANGE,
-                                /* source_owner= */ UID_INVALID,
-                                /* dest_owner= */ UID_INVALID,
-                                REMOUNT_IDMAPPING_NONE);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to idmap '%s' to UID/GID shift " UID_FMT ": %m", arg_where, arg_uid_shift);
-        }
 
          return 0;
 }
