@@ -768,6 +768,7 @@ static int mangle_uid_into_key(
                 uid_t uid,
                 uint8_t md[static SHA256_DIGEST_LENGTH]) {
 
+        _cleanup_free_ struct passwd *pw = NULL;
         sd_id128_t mid;
         int r;
 
@@ -778,12 +779,9 @@ static int mangle_uid_into_key(
          * (specifically, UID, user name, machine ID) with the key we'd otherwise use for system credentials,
          * and use the resulting hash as actual encryption key. */
 
-        errno = 0;
-        struct passwd *pw = getpwuid(uid);
-        if (!pw)
-                return log_error_errno(
-                                IN_SET(errno, 0, ENOENT) ? SYNTHETIC_ERRNO(ESRCH) : errno,
-                                "Failed to resolve UID " UID_FMT ": %m", uid);
+        r = getpwuid_malloc(uid, &pw);
+        if (r < 0)
+                return log_error_errno(r, "Failed to resolve UID "UID_FMT": %m", uid);
 
         r = sd_id128_get_machine(&mid);
         if (r < 0)
@@ -962,6 +960,7 @@ int encrypt_credential_and_warn(
                                 tpm2_hash_pcr_values,
                                 tpm2_n_hash_pcr_values,
                                 iovec_is_set(&pubkey) ? &public : NULL,
+                                /* pubkey_policy_ref= */ NULL,
                                 /* use_pin= */ false,
                                 /* pcrlock_policy= */ NULL,
                                 &tpm2_policy);
@@ -1378,6 +1377,7 @@ int decrypt_credential_and_warn(
                                 le64toh(t->pcr_mask),
                                 le16toh(t->pcr_bank),
                                 z ? &IOVEC_MAKE(z->data, le32toh(z->size)) : NULL,
+                                /* pubkey_policy_ref= */ NULL,
                                 z ? le64toh(z->pcr_mask) : 0,
                                 signature_json,
                                 /* pin= */ NULL,

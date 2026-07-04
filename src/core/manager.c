@@ -900,7 +900,7 @@ static int pin_executor_binary(int *ret_fd) {
 
         assert(ret_fd);
 
-#if BUILD_EXECUTOR_SINGLE
+#if SYSTEMD_MULTICALL_BINARY
         int r;
 
         r = open_and_check_executable("/proc/self/exe", /* root= */ NULL, &path, ret_fd);
@@ -2527,20 +2527,34 @@ int manager_add_job_by_name(Manager *m, JobType type, const char *name, JobMode 
         return manager_add_job_full(m, type, unit, mode, /* extra_flags= */ 0, affected_jobs, e, ret);
 }
 
-int manager_add_job_by_name_and_warn(Manager *m, JobType type, const char *name, JobMode mode, Set *affected_jobs, Job **ret) {
+static int manager_add_job_by_name_or_warn_with_fallback(
+                Manager *m,
+                JobType type,
+                const char *name,
+                const char *fallback,
+                JobMode mode,
+                Set *affected_jobs,
+                Job **ret) {
+
         _cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
         int r;
 
-        assert(m);
-        assert(type < _JOB_TYPE_MAX);
-        assert(name);
-        assert(mode < _JOB_MODE_MAX);
-
         r = manager_add_job_by_name(m, type, name, mode, affected_jobs, &error, ret);
+        if (r == -ENOENT && fallback) {
+                log_debug_errno(r, "Failed to enqueue job %s/%s, fallback to %s: %s",
+                                name, job_mode_to_string(mode), fallback, bus_error_message(&error, r));
+                sd_bus_error_free(&error);
+                name = fallback;
+                r = manager_add_job_by_name(m, type, name, mode, affected_jobs, &error, ret);
+        }
         if (r < 0)
-                return log_warning_errno(r, "Failed to enqueue %s job for %s: %s", job_mode_to_string(mode), name, bus_error_message(&error, r));
-
+                return log_warning_errno(r, "Failed to enqueue job %s/%s: %s",
+                                         name, job_mode_to_string(mode), bus_error_message(&error, r));
         return r;
+}
+
+int manager_add_job_by_name_or_warn(Manager *m, JobType type, const char *name, JobMode mode, Set *affected_jobs, Job **ret) {
+        return manager_add_job_by_name_or_warn_with_fallback(m, type, name, /* fallback= */ NULL, mode, affected_jobs, ret);
 }
 
 int manager_propagate_reload(Manager *m, Unit *unit, JobMode mode, sd_bus_error *e) {
@@ -2788,6 +2802,7 @@ int manager_load_startable_unit_or_warn(
                 Manager *m,
                 const char *name,
                 const char *path,
+                int log_level,
                 Unit **ret) {
 
         /* Load a unit, make sure it loaded fully and is not masked. */
@@ -2800,13 +2815,13 @@ int manager_load_startable_unit_or_warn(
 
         r = manager_load_unit(m, name, path, &error, &unit);
         if (r < 0)
-                return log_error_errno(r, "Failed to load %s %s: %s",
-                                       name ? "unit" : "unit file", name ?: path,
-                                       bus_error_message(&error, r));
+                return log_full_errno(log_level, r, "Failed to load %s %s: %s",
+                                      name ? "unit" : "unit file", name ?: path,
+                                      bus_error_message(&error, r));
 
         r = bus_unit_validate_load_state(unit, &error);
         if (r < 0)
-                return log_error_errno(r, "%s", bus_error_message(&error, r));
+                return log_full_errno(log_level, r, "%s", bus_error_message(&error, r));
 
         *ret = unit;
         return 0;
@@ -3205,10 +3220,10 @@ turn_off:
         return 0;
 }
 
-static void manager_start_special(Manager *m, const char *name, JobMode mode) {
+static void manager_start_special_with_fallback(Manager *m, const char *name, const char *fallback, JobMode mode) {
         Job *job;
 
-        if (manager_add_job_by_name_and_warn(m, JOB_START, name, mode, NULL, &job) < 0)
+        if (manager_add_job_by_name_or_warn_with_fallback(m, JOB_START, name, fallback, mode, /* affected_jobs= */ NULL, &job) < 0)
                 return;
 
         const char *s = unit_status_string(job->unit, NULL);
@@ -3220,6 +3235,10 @@ static void manager_start_special(Manager *m, const char *name, JobMode mode) {
         m->status_ready = false;
 }
 
+static void manager_start_special(Manager *m, const char *name, JobMode mode) {
+        manager_start_special_with_fallback(m, name, /* fallback= */ NULL, mode);
+}
+
 static void manager_handle_ctrl_alt_del(Manager *m) {
         assert(m);
 
@@ -3227,7 +3246,11 @@ static void manager_handle_ctrl_alt_del(Manager *m) {
          * unless it was disabled in system.conf. */
 
         if (ratelimit_below(&m->ctrl_alt_del_ratelimit) || m->cad_burst_action == EMERGENCY_ACTION_NONE)
-                manager_start_special(m, SPECIAL_CTRL_ALT_DEL_TARGET, JOB_REPLACE_IRREVERSIBLY);
+                manager_start_special_with_fallback(
+                                m,
+                                SPECIAL_CTRL_ALT_DEL_TARGET,
+                                FALLBACK_CTRL_ALT_DEL_TARGET,
+                                JOB_REPLACE_IRREVERSIBLY);
         else
                 emergency_action(
                                 m,
@@ -4038,7 +4061,7 @@ static void manager_notify_finished(Manager *m) {
                 /* The soft-reboot case, where we only report data for the last reboot */
                 firmware_usec = loader_usec = initrd_usec = kernel_usec = 0;
                 total_usec = userspace_usec = usec_sub_unsigned(m->timestamps[MANAGER_TIMESTAMP_FINISH].monotonic,
-                                                                m->timestamps[MANAGER_TIMESTAMP_SHUTDOWN_START].monotonic);
+                                                                m->timestamps[MANAGER_TIMESTAMP_PREVIOUS_SHUTDOWN_START].monotonic);
 
                 log_struct(LOG_INFO,
                            LOG_MESSAGE_ID(SD_MESSAGE_STARTUP_FINISHED_STR),
@@ -5577,26 +5600,31 @@ static const char* const manager_objective_table[_MANAGER_OBJECTIVE_MAX] = {
 DEFINE_STRING_TABLE_LOOKUP(manager_objective, ManagerObjective);
 
 static const char* const manager_timestamp_table[_MANAGER_TIMESTAMP_MAX] = {
-        [MANAGER_TIMESTAMP_FIRMWARE]                 = "firmware",
-        [MANAGER_TIMESTAMP_LOADER]                   = "loader",
-        [MANAGER_TIMESTAMP_KERNEL]                   = "kernel",
-        [MANAGER_TIMESTAMP_INITRD]                   = "initrd",
-        [MANAGER_TIMESTAMP_USERSPACE]                = "userspace",
-        [MANAGER_TIMESTAMP_FINISH]                   = "finish",
-        [MANAGER_TIMESTAMP_SECURITY_START]           = "security-start",
-        [MANAGER_TIMESTAMP_SECURITY_FINISH]          = "security-finish",
-        [MANAGER_TIMESTAMP_GENERATORS_START]         = "generators-start",
-        [MANAGER_TIMESTAMP_GENERATORS_FINISH]        = "generators-finish",
-        [MANAGER_TIMESTAMP_UNITS_LOAD_START]         = "units-load-start",
-        [MANAGER_TIMESTAMP_UNITS_LOAD_FINISH]        = "units-load-finish",
-        [MANAGER_TIMESTAMP_UNITS_LOAD]               = "units-load",
-        [MANAGER_TIMESTAMP_INITRD_SECURITY_START]    = "initrd-security-start",
-        [MANAGER_TIMESTAMP_INITRD_SECURITY_FINISH]   = "initrd-security-finish",
-        [MANAGER_TIMESTAMP_INITRD_GENERATORS_START]  = "initrd-generators-start",
-        [MANAGER_TIMESTAMP_INITRD_GENERATORS_FINISH] = "initrd-generators-finish",
-        [MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_START]  = "initrd-units-load-start",
-        [MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_FINISH] = "initrd-units-load-finish",
-        [MANAGER_TIMESTAMP_SHUTDOWN_START]           = "shutdown-start",
+        [MANAGER_TIMESTAMP_FIRMWARE]                      = "firmware",
+        [MANAGER_TIMESTAMP_LOADER]                        = "loader",
+        [MANAGER_TIMESTAMP_KERNEL]                        = "kernel",
+        [MANAGER_TIMESTAMP_INITRD]                        = "initrd",
+        [MANAGER_TIMESTAMP_USERSPACE]                     = "userspace",
+        [MANAGER_TIMESTAMP_FINISH]                        = "finish",
+        [MANAGER_TIMESTAMP_SECURITY_START]                = "security-start",
+        [MANAGER_TIMESTAMP_SECURITY_FINISH]               = "security-finish",
+        [MANAGER_TIMESTAMP_GENERATORS_START]              = "generators-start",
+        [MANAGER_TIMESTAMP_GENERATORS_FINISH]             = "generators-finish",
+        [MANAGER_TIMESTAMP_UNITS_LOAD_START]              = "units-load-start",
+        [MANAGER_TIMESTAMP_UNITS_LOAD_FINISH]             = "units-load-finish",
+        [MANAGER_TIMESTAMP_UNITS_LOAD]                    = "units-load",
+        [MANAGER_TIMESTAMP_INITRD_SECURITY_START]         = "initrd-security-start",
+        [MANAGER_TIMESTAMP_INITRD_SECURITY_FINISH]        = "initrd-security-finish",
+        [MANAGER_TIMESTAMP_INITRD_GENERATORS_START]       = "initrd-generators-start",
+        [MANAGER_TIMESTAMP_INITRD_GENERATORS_FINISH]      = "initrd-generators-finish",
+        [MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_START]       = "initrd-units-load-start",
+        [MANAGER_TIMESTAMP_INITRD_UNITS_LOAD_FINISH]      = "initrd-units-load-finish",
+        [MANAGER_TIMESTAMP_SHUTDOWN_START]                = "shutdown-start",
+        [MANAGER_TIMESTAMP_SHUTDOWN_FINISH]               = "shutdown-finish",
+        [MANAGER_TIMESTAMP_PREVIOUS_SHUTDOWN_START]       = "previous-shutdown-start",
+        [MANAGER_TIMESTAMP_PREVIOUS_SHUTDOWN_FINISH]      = "previous-shutdown-finish",
+        [MANAGER_TIMESTAMP_PREVIOUS_SHUTDOWN_LATE_START]  = "previous-shutdown-late-start",
+        [MANAGER_TIMESTAMP_PREVIOUS_SHUTDOWN_LATE_FINISH] = "previous-shutdown-late-finish",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(manager_timestamp, ManagerTimestamp);

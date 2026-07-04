@@ -147,7 +147,6 @@ SPDX-License-Identifier: LGPL-2.1-or-later
   - teach cgroup metrics provider to expose PSI information
   - implement metrics provider that reports local IP addresses, and bound open
     IP ports
-  - implement current system load via metrics
   - metrics from pid1: suppress metrics form units that are inactive and have nothing to report
   - pass filtering hints to services, so that they can also be applied server-side, not just client side
   - add "hint-suppress-zero" flag (which suppresses all metrics which are zero)
@@ -174,8 +173,6 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 - os-release consumption at boot: version validation, and maybe in os-release
 
 - ed25519 authentication for sd-boot upgrades for the dm-verity key logic
-
-- change machine tags into key/value pairs instead of just labels
 
 - in sysupdate resolve %C or so as specifier in transfer fiels to the value of
   a specific machine tag channel= or so.
@@ -259,16 +256,11 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 - sysupdate: add concept for enabling/disabling specific components explicitly,
   just like features.
 
-- hostnamectl: management, collation of all tags. four sources: udev,
-  /etc/machine-info, credentials, and /etc/machine-tags.d/*.conf
-
 - sysupdate: add conditions to transfer files, copying what we have for unit
   files and .network files
 
 - pid1,sysupdate,network: add support for a new "tags" condition, that checks
   all of the above.
-
-- sysupdate: write out database of all files created, and support gc of it
 
 - pcrextend: we probably should measure /etc/machine-info during boot somehow
 
@@ -945,16 +937,6 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 - dot output for --test showing the 'initial transaction'
 
 - drop nss-myhostname in favour of nss-resolve?
-
-- drop NV_ORDERLY flag from the product uuid nvpcr. Effect of the flag is that
-  it pushes the thing into TPM RAM, but a TPM usually has very little of that,
-  less than NVRAM. hence setting the flag amplifies space issues. Unsetting the
-  flag increases wear issues on the NVRAM, however, but this should be limited
-  for the product uuid nvpcr, since its only changed once per boot. this needs
-  to be configurable by nvpcr however, as other nvpcrs are different,
-  i.e. verity one receives many writes during system uptime quite
-  possibly. (also, NV_ORDERLY makes stuff faster, and dropping it costs
-  possibly up to 100ms supposedly)
 
 - **EFI:**
   - honor timezone efi variables for default timezone selection (if there are any?)
@@ -2443,6 +2425,12 @@ SPDX-License-Identifier: LGPL-2.1-or-later
     as mass storage devices on systems that have a USB controller that can
     operate in device mode
   - add NVMe authentication
+
+- **sigpwr.target** doesn't do anything useful. Consider hooking it up to
+  poweroff.target.
+
+- Provide a fallback in **rescue.service** that prints a fixed message
+  if sulogin-shell could not be started.
 
 - support boot into nvme-over-tcp: add generator that allows specifying nvme
   devices on kernel cmdline + credentials. Also maybe add interactive mode
