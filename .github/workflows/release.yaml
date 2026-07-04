@@ -105,12 +105,20 @@ jobs:
           patchelf --set-rpath '$ORIGIN' build/systemd-nspawn
           patchelf --set-rpath '$ORIGIN' build/systemd-mstack
 
+      - name: Get systemd version
+        id: systemd_version
+        run: |
+          VERSION_LINE="$(build/systemd-nspawn --version | head -n1)"
+          echo "line=${VERSION_LINE}" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           # This automatically creates the release based on the tag (e.g., v1.0.1)
           prerelease: ${{ contains(github.ref_name, '-rc') }}
           draft: false
+          body: |
+            Built from `${{ steps.systemd_version.outputs.line }}`
           # Uploads compiled binary to the release page
           files: |
             build/systemd-nspawn
