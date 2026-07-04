@@ -108,7 +108,9 @@ jobs:
       - name: Get systemd version
         id: systemd_version
         run: |
-          VERSION_LINE="$(build/systemd-nspawn --version | head -n1)"
+          # Before the release assets are flattened into one directory, the shared lib
+          # still lives under build/src/shared/, not next to the $ORIGIN-rpath'd binary.
+          VERSION_LINE="$(LD_LIBRARY_PATH=build/src/shared build/systemd-nspawn --version | head -n1)"
           echo "line=${VERSION_LINE}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
