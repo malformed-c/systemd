@@ -220,6 +220,7 @@ static PagerFlags arg_pager_flags = 0;
 static unsigned long arg_personality = PERSONALITY_INVALID;
 static char *arg_image = NULL;
 static char *arg_mstack = NULL;
+static uid_t arg_mstack_uid_shift = UID_INVALID;
 static char *arg_oci_bundle = NULL;
 static VolatileMode arg_volatile_mode = VOLATILE_NO;
 static ExposePort *arg_expose_ports = NULL;
@@ -662,6 +663,13 @@ static int parse_argv(int argc, char *argv[]) {
                         if (r < 0)
                                 return r;
                         arg_settings_mask |= SETTING_DIRECTORY;
+                        break;
+
+                OPTION_LONG("mstack-uid-shift", "UID",
+                            "Idmap the .mstack/ root so host UID/GID 0 maps to the given UID/GID (fixed 65536 range)"):
+                        r = parse_uid(opts.arg, &arg_mstack_uid_shift);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to parse --mstack-uid-shift= parameter: %s", opts.arg);
                         break;
 
                 OPTION_LONG("oci-bundle", "PATH", "OCI bundle directory"):
@@ -4158,12 +4166,13 @@ static int outer_child(
                  * the target mount dir as temporary mount dir here. We after all just need some dir here
                  * that definitely exists, and the temporary mounts on it are not going to be visible
                  * outside. */
-                /* nspawn does its own idmapping separately, via --private-users=. */
+                /* uid_shift is UID_INVALID unless --mstack-uid-shift= was given; nspawn's own
+                 * --private-users= is a separate idmapping mechanism. */
                 r = mstack_make_mounts(
                                 mstack,
                                 /* temp_mount_dir= */ directory, /* !! */
                                 mstack_flags,
-                                /* uid_shift= */ UID_INVALID);
+                                /* uid_shift= */ arg_mstack_uid_shift);
                 if (r < 0)
                         return log_error_errno(r, "Failed to make .mstack/ mounts: %m");
 
