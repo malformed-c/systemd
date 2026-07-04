@@ -27,6 +27,7 @@
 #include "string-util.h"
 #include "tmpfile-util.h"
 #include "uid-classification.h"
+#include "user-util.h"
 #include "unit-name.h"
 #include "vpick.h"
 
@@ -722,6 +723,7 @@ static int mstack_make_overlayfs(
                 MStack *mstack,
                 const char *temp_mount_dir,
                 MStackFlags flags,
+                uid_t uid_shift,
                 int *ret_overlayfs_mnt_fd) {
 
         int r;
@@ -736,6 +738,18 @@ static int mstack_make_overlayfs(
         }
 
         bool writable = mstack_has_writable_layers(mstack, flags);
+
+        /* overlayfs cannot itself be the target of an idmapped mount (mount_setattr(MOUNT_ATTR_IDMAP) on an
+         * already-merged overlay returns EINVAL) - the kernel only supports idmapping the individual layers
+         * that go INTO an overlay, before they're merged. So if an idmap was requested, acquire the userns
+         * once here and apply it to each layer's cloned mount fd below, before it's merged; the assembled
+         * overlay then inherits the mapping from its already-idmapped layers. */
+        _cleanup_close_ int uidmap_userns_fd = -EBADF;
+        if (uid_is_valid(uid_shift)) {
+                uidmap_userns_fd = make_userns(uid_shift, MSTACK_UID_SHIFT_RANGE, UID_INVALID, UID_INVALID, REMOUNT_IDMAPPING_NONE);
+                if (uidmap_userns_fd < 0)
+                        return log_debug_errno(uidmap_userns_fd, "Failed to create idmap userns: %m");
+        }
 
         _cleanup_close_ int sb_fd = fsopen("overlay", FSOPEN_CLOEXEC);
         if (sb_fd < 0)
@@ -770,11 +784,53 @@ static int mstack_make_overlayfs(
                         if (!IN_SET(m->mount_type, MSTACK_RW, MSTACK_LAYER, MSTACK_ROOT))
                                 continue;
 
+                        int source_fd = ASSERT_FD(mount_get_fd(m));
+                        bool rw_readonly = m->mount_type == MSTACK_RW && mount_is_ro(mstack, m, flags);
+                        bool rw_writable = m->mount_type == MSTACK_RW && !rw_readonly;
+                        bool have_data_dir = true;
+
+                        /* Ensure 'data'/'work' exist (if needed) on the ORIGINAL source, before cloning it
+                         * below - not on the clone itself. Idmapped mounts (applied to the clone further
+                         * down) refuse further inode creation through them for a caller outside the mapped
+                         * range (EOVERFLOW - our own, unmapped credentials can't be represented as a
+                         * backing-store owner), and separately the kernel also refuses to idmap a mount that
+                         * has itself already had inodes created through that specific mount instance
+                         * (EINVAL) - so any creation has to happen on the pre-clone source, never on the
+                         * clone we're about to idmap. */
+                        if (rw_writable) {
+                                if (mkdirat(source_fd, "data", 0755) < 0 && errno != EEXIST)
+                                        report_errno_and_exit(errno_pipe_fds[1], -errno);
+                                if (mkdirat(source_fd, "work", 0755) < 0 && errno != EEXIST)
+                                        report_errno_and_exit(errno_pipe_fds[1], -errno);
+                        } else if (rw_readonly) {
+                                r = RET_NERRNO(faccessat(source_fd, "data", F_OK, 0));
+                                if (r == -ENOENT) /* If the 'data' dir doesn't exist, just skip over this
+                                                    * layer entirely, it apparently was never created, but
+                                                    * that's fine for a read-only invocation */
+                                        have_data_dir = false;
+                                else if (r < 0)
+                                        report_errno_and_exit(errno_pipe_fds[1], r);
+                        }
+
                         /* overlayfs refuses to work with layers on mounts not owned by our userns, hence create a
                          * clone that is owned by our userns */
-                        _cleanup_close_ int cloned_fd = mount_fd_clone(ASSERT_FD(mount_get_fd(m)), /* recursive= */ false, /* replacement_fd= */ NULL);
+                        _cleanup_close_ int cloned_fd = mount_fd_clone(source_fd, /* recursive= */ false, /* replacement_fd= */ NULL);
                         if (cloned_fd < 0)
                                 report_errno_and_exit(errno_pipe_fds[1], cloned_fd);
+
+                        /* Idmap the layer here, while it's still a fresh, unattached clone with nothing yet
+                         * created through it: this is the only point at which the kernel allows
+                         * MOUNT_ATTR_IDMAP for what will become part of an overlay (see the
+                         * uidmap_userns_fd comment above). */
+                        if (uidmap_userns_fd >= 0 &&
+                            mount_setattr(cloned_fd, "", AT_EMPTY_PATH,
+                                          &(struct mount_attr) {
+                                                  .attr_set = MOUNT_ATTR_IDMAP,
+                                                  .userns_fd = uidmap_userns_fd,
+                                          }, sizeof(struct mount_attr)) < 0) {
+                                log_debug_errno(errno, "Failed to idmap layer %s: %m", m->what);
+                                report_errno_and_exit(errno_pipe_fds[1], -errno);
+                        }
 
                         /* When working with detached mounts overlayfs (which requires kernel 6.14) currently
                          * insists on upperdir being the root inode of the mount. But that collides with the
@@ -792,15 +848,12 @@ static int mstack_make_overlayfs(
                         switch (m->mount_type) {
 
                         case MSTACK_RW: {
-                                if (mount_is_ro(mstack, m, flags)) {
-                                        /* If invoked in read-only mode we'll not create the data dir, but use it if it exists */
+                                if (rw_readonly) {
+                                        if (!have_data_dir)
+                                                break;
+
                                         _cleanup_close_ int data_fd = openat(temp_fd, "data", O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY);
                                         if (data_fd < 0) {
-                                                if (errno == ENOENT) /* If the 'data' dir doesn't exist, just skip
-                                                                      * over it, it apparently was never created, but
-                                                                      * that's fine for a read-only invocation */
-                                                        break;
-
                                                 log_debug_errno(errno, "Failed to open 'data' directory below 'rw' layer: %m");
                                                 report_errno_and_exit(errno_pipe_fds[1], -errno);
                                         }
@@ -812,24 +865,18 @@ static int mstack_make_overlayfs(
                                                 report_errno_and_exit(errno_pipe_fds[1], r);
                                         }
                                 } else {
-                                        /* If invoked in writable mode, let's create the data dir if it is missing */
-                                        _cleanup_close_ int data_fd = open_mkdir_at(temp_fd, "data", O_CLOEXEC|O_NOFOLLOW, 0755);
+                                        /* 'data'/'work' were already created (if missing) on the pre-clone
+                                         * source above, so just open them here. */
+                                        _cleanup_close_ int data_fd = openat(temp_fd, "data", O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY);
                                         if (data_fd < 0) {
-                                                log_debug_errno(data_fd, "Failed to open 'data' directory below 'rw' layer: %m");
-                                                report_errno_and_exit(errno_pipe_fds[1], data_fd);
+                                                log_debug_errno(errno, "Failed to open 'data' directory below 'rw' layer: %m");
+                                                report_errno_and_exit(errno_pipe_fds[1], -errno);
                                         }
 
-                                        r = fsconfig_add_layer(sb_fd, "upperdir", data_fd);
-                                        if (r < 0) {
-                                                log_debug_errno(r, "Failed to set mount layer upperdir=%s/data: %m", m->what);
-                                                report_errno_and_exit(errno_pipe_fds[1], r);
-                                        }
-
-                                        /* Similar, create the work directory */
-                                        _cleanup_close_ int work_fd = open_mkdir_at(temp_fd, "work", O_CLOEXEC|O_NOFOLLOW, 0755);
+                                        _cleanup_close_ int work_fd = openat(temp_fd, "work", O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY);
                                         if (work_fd < 0) {
-                                                log_debug_errno(work_fd, "Failed to open 'work' directory below 'rw' layer: %m");
-                                                report_errno_and_exit(errno_pipe_fds[1], work_fd);
+                                                log_debug_errno(errno, "Failed to open 'work' directory below 'rw' layer: %m");
+                                                report_errno_and_exit(errno_pipe_fds[1], -errno);
                                         }
 
                                         /* rm_rf_children() takes possession of the fd no matter what, let's dup it here */
@@ -843,6 +890,12 @@ static int mstack_make_overlayfs(
                                         r = rm_rf_children(dup_fd, REMOVE_PHYSICAL, /* root_dev= */ NULL);
                                         if (r < 0)
                                                 log_debug_errno(r, "Failed to empty 'work' directory below 'rw' layer, ignoring: %m");
+
+                                        r = fsconfig_add_layer(sb_fd, "upperdir", data_fd);
+                                        if (r < 0) {
+                                                log_debug_errno(r, "Failed to set mount layer upperdir=%s/data: %m", m->what);
+                                                report_errno_and_exit(errno_pipe_fds[1], r);
+                                        }
 
                                         r = fsconfig_add_layer(sb_fd, "workdir", work_fd);
                                         if (r < 0) {
@@ -918,7 +971,8 @@ static int mstack_make_overlayfs(
 int mstack_make_mounts(
                 MStack *mstack,
                 const char *temp_mount_dir,
-                MStackFlags flags) {
+                MStackFlags flags,
+                uid_t uid_shift) {
 
         int r;
 
@@ -926,7 +980,7 @@ int mstack_make_mounts(
         assert(temp_mount_dir);
 
         _cleanup_close_ int overlayfs_mnt_fd = -EBADF;
-        r = mstack_make_overlayfs(mstack, temp_mount_dir, flags, &overlayfs_mnt_fd);
+        r = mstack_make_overlayfs(mstack, temp_mount_dir, flags, uid_shift, &overlayfs_mnt_fd);
         if (r < 0)
                 return r;
         if (r > 0)
@@ -970,6 +1024,21 @@ int mstack_make_mounts(
          * then the overlayfs is our root */
         if (mstack->root_mount_fd < 0)
                 mstack->root_mount_fd = TAKE_FD(overlayfs_mnt_fd);
+        else if (uid_is_valid(uid_shift)) {
+                /* Unlike the overlay case above (already idmapped layer-by-layer before merging), this is a
+                 * plain, single, not-yet-attached mount (a bind of root/ alone, or a throwaway tmpfs) -
+                 * regular filesystems ARE a valid target for MOUNT_ATTR_IDMAP directly. */
+                _cleanup_close_ int userns_fd = make_userns(uid_shift, MSTACK_UID_SHIFT_RANGE, UID_INVALID, UID_INVALID, REMOUNT_IDMAPPING_NONE);
+                if (userns_fd < 0)
+                        return log_debug_errno(userns_fd, "Failed to create idmap userns: %m");
+
+                if (mount_setattr(mstack->root_mount_fd, "", AT_EMPTY_PATH,
+                                  &(struct mount_attr) {
+                                          .attr_set = MOUNT_ATTR_IDMAP,
+                                          .userns_fd = userns_fd,
+                                  }, sizeof(struct mount_attr)) < 0)
+                        return log_debug_errno(errno, "Failed to idmap root mount: %m");
+        }
 
         return 0;
 }
@@ -1180,6 +1249,7 @@ int mstack_apply(
                 const ImagePolicy *image_policy,
                 const ImageFilter *image_filter,
                 MStackFlags flags,
+                uid_t uid_shift,
                 int *ret_root_fd) {
         int r;
 
@@ -1203,7 +1273,7 @@ int mstack_apply(
                 temp_mount_dir = t;
         }
 
-        r = mstack_make_mounts(&mstack, temp_mount_dir, flags);
+        r = mstack_make_mounts(&mstack, temp_mount_dir, flags, uid_shift);
         if (r < 0)
                 return r;
 

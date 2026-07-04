@@ -11,6 +11,10 @@ typedef enum MStackFlags {
         MSTACK_BINDS_RDONLY = 1 << 3, /* Ensure bind@ mounts are read-only only if explicitly requested */
 } MStackFlags;
 
+/* Fixed idmap range applied together with a uid_shift, matching the single-userns-per-container
+ * allocation size used throughout the rest of the mstack/nspawn userns machinery. */
+#define MSTACK_UID_SHIFT_RANGE UINT32_C(65536)
+
 typedef enum MStackMountType {
         MSTACK_ROOT,     /* optional "root" entry used as the base (bottommost) layer of the overlayfs
                           * stack when layer@/rw are also present, or as the root directly on its own */
@@ -54,11 +58,12 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(MStack*, mstack_free);
 int mstack_load(const char *dir, int dir_fd, MStack **ret);
 int mstack_open_images(MStack *mstack, sd_varlink *mountfsd_link, int userns_fd, const ImagePolicy *image_policy, const ImageFilter *image_filter, MStackFlags flags);
 bool mstack_has_writable_layers(MStack *mstack, MStackFlags flags);
-int mstack_make_mounts(MStack *mstack, const char *temp_mount_dir, MStackFlags flags);
+int mstack_make_mounts(MStack *mstack, const char *temp_mount_dir, MStackFlags flags, uid_t uid_shift);
 int mstack_apply_bind_mounts(MStack *mstack, int root_fd, const char *where, MStackFlags flags);
 int mstack_bind_mounts(MStack *mstack, const char *where, int where_fd, MStackFlags flags, int *ret_root_fd);
 
-/* The four calls above in one */
+/* The four calls above in one. uid_shift may be UID_INVALID to skip idmapping (fixed range
+ * MSTACK_UID_SHIFT_RANGE otherwise). */
 int mstack_apply(
                 const char *dir,
                 int dir_fd,
@@ -69,6 +74,7 @@ int mstack_apply(
                 const ImagePolicy *image_policy,
                 const ImageFilter *image_filter,
                 MStackFlags flags,
+                uid_t uid_shift,
                 int *ret_root_fd);
 
 int mstack_is_read_only(MStack *mstack);
