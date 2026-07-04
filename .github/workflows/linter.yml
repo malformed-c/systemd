@@ -5,11 +5,7 @@
 name: Lint Code Base
 
 on:
-  pull_request:
-    branches:
-      - main
-      - v[0-9]+-stable
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

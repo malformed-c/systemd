@@ -3,11 +3,7 @@
 
 name: Development Freeze
 on:
-  workflow_run:
-    workflows: [ Gather Pull Request Metadata ]
-    types:
-      - completed
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

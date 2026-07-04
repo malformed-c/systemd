@@ -3,18 +3,7 @@
 name: coverage
 
 on:
-  schedule:
-    # Calculate coverage daily at midnight
-    - cron:  '0 0 * * *'
-
-  pull_request:
-    branches:
-      - main
-      - v[0-9]+-stable
-    paths:
-      - .github/workflows/coverage.yml
-      - test/integration-tests/integration-test-wrapper.py
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

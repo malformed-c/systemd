@@ -1,10 +1,7 @@
 name: Make a Github release
 
 on:
-  push:
-    tags:
-      - "v*"
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

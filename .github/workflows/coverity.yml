@@ -5,10 +5,7 @@
 name: Coverity
 
 on:
-  schedule:
-    # Run Coverity daily at midnight
-    - cron:  '0 0 * * *'
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

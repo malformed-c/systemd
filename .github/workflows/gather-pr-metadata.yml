@@ -3,9 +3,7 @@
 name: Gather Pull Request Metadata
 
 on:
-  pull_request:
-    branches: [ main ]
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

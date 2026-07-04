@@ -5,42 +5,7 @@
 name: mkosi
 
 on:
-  push:
-    branches:
-      - main
-      - v[0-9]+-stable
-    paths:
-      - "**"
-      - "!README*"
-      - "!LICENSE*"
-      - "!LICENSES/**"
-      - "!TODO"
-      - "!docs/**"
-      - "!man/**"
-      - "!catalog/**"
-      - "!shell-completion/**"
-      - "!po/**"
-      - "!.**"
-      - ".github/**"
-
-  pull_request:
-    branches:
-      - main
-      - v[0-9]+-stable
-    paths:
-      - "**"
-      - "!README*"
-      - "!LICENSE*"
-      - "!LICENSES/**"
-      - "!TODO"
-      - "!docs/**"
-      - "!man/**"
-      - "!catalog/**"
-      - "!shell-completion/**"
-      - "!po/**"
-      - "!.**"
-      - ".github/**"
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

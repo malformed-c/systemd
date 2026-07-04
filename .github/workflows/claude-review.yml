@@ -10,17 +10,7 @@
 name: Claude Review
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, labeled]
-  # Strangely enough you have to use issue_comment to react to regular comments on PRs.
-  # See https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_comment-use-issue_comment.
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  pull_request_review:
-    types: [submitted]
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 concurrency:
   group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
 

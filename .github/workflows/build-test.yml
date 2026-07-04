@@ -4,14 +4,7 @@
 #
 name: Build test
 on:
-  pull_request:
-    paths:
-      - '**/meson.build'
-      - '.github/workflows/**'
-      - 'meson_options.txt'
-      - 'src/**'
-      - 'test/fuzz/**'
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

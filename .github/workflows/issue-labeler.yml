@@ -2,9 +2,7 @@
 
 name: Issue labeler
 on:
-  issues:
-    types: [ opened ]
-
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 permissions:
   contents: read
 

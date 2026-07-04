@@ -9,17 +9,7 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    paths:
-      - '**/meson.build'
-      - '.github/workflows/**'
-      - 'meson_options.txt'
-      - 'src/**'
-      - 'test/fuzz/**'
-      - 'tools/oss-fuzz.sh'
-  push:
-    branches:
-      - main
+  workflow_dispatch: # disabled automatic triggers for this fork; run manually if ever needed
 jobs:
   Fuzzing:
     runs-on: ubuntu-24.04
