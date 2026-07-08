@@ -16,8 +16,17 @@ env:
   CC: "ccache gcc"
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-24.04
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-24.04
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runs-on }}
 
     steps:
       - name: Checkout code
@@ -29,7 +38,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-packages
+          key: ${{ runner.os }}-${{ matrix.arch }}-apt-packages
 
       - name: Install Build Dependencies
         run: |
@@ -78,13 +87,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          # The key changes if the OS changes, ensuring we don't use
-          # caches from different Ubuntu versions.
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          # The key changes if the OS or arch changes, ensuring we don't use
+          # caches from different Ubuntu versions/architectures.
+          key: ${{ runner.os }}-${{ matrix.arch }}-ccache-${{ github.sha }}
           # restore-keys allows us to pull the most recent cache
           # even if the exact SHA doesn't match
           restore-keys: |
-            ${{ runner.os }}-ccache-
+            ${{ runner.os }}-${{ matrix.arch }}-ccache-
 
       - name: Configure ccache
         run: |
@@ -113,6 +122,40 @@ jobs:
           VERSION_LINE="$(LD_LIBRARY_PATH=build/src/shared build/systemd-nspawn --version | head -n1)"
           echo "line=${VERSION_LINE}" >> "$GITHUB_OUTPUT"
 
+      - name: Package artifacts
+        run: |
+          # Bundle each arch's binaries + shared lib together under one archive name so
+          # the amd64 and arm64 uploads don't collide over identically-named files
+          # (systemd-nspawn, libsystemd-shared-*.so) on the same GitHub Release.
+          dist="systemd-nspawn-${{ matrix.arch }}"
+          mkdir -p "$dist"
+          cp build/systemd-nspawn build/systemd-mstack "$dist"/
+          cp build/src/shared/libsystemd-shared-*.so "$dist"/
+          echo "${{ steps.systemd_version.outputs.line }}" > "$dist"/VERSION
+          tar -czf "${dist}.tar.gz" "$dist"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: systemd-nspawn-${{ matrix.arch }}
+          path: systemd-nspawn-${{ matrix.arch }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get systemd version
+        id: systemd_version
+        run: |
+          tar -xzOf artifacts/systemd-nspawn-amd64/systemd-nspawn-amd64.tar.gz systemd-nspawn-amd64/VERSION > version.txt
+          echo "line=$(cat version.txt)" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -121,8 +164,7 @@ jobs:
           draft: false
           body: |
             Built from `${{ steps.systemd_version.outputs.line }}`
-          # Uploads compiled binary to the release page
+          # Uploads each arch's archive to the release page
           files: |
-            build/systemd-nspawn
-            build/systemd-mstack
-            build/**/libsystemd-shared-*.so
+            artifacts/systemd-nspawn-amd64/systemd-nspawn-amd64.tar.gz
+            artifacts/systemd-nspawn-arm64/systemd-nspawn-arm64.tar.gz
