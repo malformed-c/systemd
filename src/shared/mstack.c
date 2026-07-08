@@ -25,6 +25,7 @@
 #include "stat-util.h"
 #include "string-table.h"
 #include "string-util.h"
+#include "strv.h"
 #include "tmpfile-util.h"
 #include "uid-classification.h"
 #include "user-util.h"
@@ -719,6 +720,28 @@ static int fsconfig_add_layer(int sb_fd, const char *key, int layer_fd) {
         return RET_NERRNO(fsconfig(sb_fd, FSCONFIG_SET_STRING, key, layer_path, /* aux= */ 0));
 }
 
+/* Sets the remaining overlayfs mount options and materializes the superblock. Split out of
+ * mstack_make_overlayfs() below so it can be called a second time, on a second superblock, as part of
+ * the "lowerdir+" EINVAL fallback described there. */
+static int mstack_overlayfs_create(int sb_fd, bool writable, const char *source) {
+        assert(sb_fd >= 0);
+        assert(source);
+
+        if (!writable && fsconfig(sb_fd, FSCONFIG_SET_FLAG, "ro", /* value= */ NULL, /* aux= */ 0) < 0)
+                return log_debug_errno(errno, "Failed to set read-only mount flag: %m");
+
+        if (fsconfig(sb_fd, FSCONFIG_SET_FLAG, "userxattr", /* value= */ NULL, /* aux= */ 0) < 0)
+                return log_debug_errno(errno, "Failed to set userxattr mount flag: %m");
+
+        if (fsconfig(sb_fd, FSCONFIG_SET_STRING, "source", source, /* aux= */ 0) < 0)
+                return log_debug_errno(errno, "Failed to set mount source: %m");
+
+        /* This is where the superblock is materialized. It must be called from the child's namespace,
+         * where the mounts are attached as described above, otherwise overlayfs is unhappy and will
+         * refuse the superblock to be created. */
+        return RET_NERRNO(fsconfig(sb_fd, FSCONFIG_CMD_CREATE, /* key= */ NULL, /* value= */ NULL, /* aux= */ 0));
+}
+
 static int mstack_make_overlayfs(
                 MStack *mstack,
                 const char *temp_mount_dir,
@@ -755,6 +778,16 @@ static int mstack_make_overlayfs(
         if (sb_fd < 0)
                 return log_debug_errno(errno, "Failed to create overlayfs: %m");
 
+        /* Some kernels only partially back-port overlayfs's fs_context-based incremental "lowerdir+"
+         * layer scheme (mainlined in Linux 6.5): every individual fsconfig() call to add a layer via
+         * "lowerdir+" succeeds, yet FSCONFIG_CMD_CREATE still fails with EINVAL. A bare retry on the
+         * same fs_context after that returns EBUSY, so a genuinely fresh superblock is needed - and
+         * since fds opened by the child below after fork() aren't visible to us afterwards, it has to
+         * be opened here, before forking, so it's shared with the child exactly like the one above. */
+        _cleanup_close_ int sb_fd_fallback = fsopen("overlay", FSOPEN_CLOEXEC);
+        if (sb_fd_fallback < 0)
+                return log_debug_errno(errno, "Failed to create fallback overlayfs: %m");
+
         _cleanup_close_pair_ int errno_pipe_fds[2] = EBADF_PAIR;
         if (pipe2(errno_pipe_fds, O_CLOEXEC) < 0)
                 return log_debug_errno(errno, "Failed to open pipe: %m");
@@ -776,6 +809,14 @@ static int mstack_make_overlayfs(
         }
         if (r == 0) {
                 /* child */
+
+                /* Every fd contributing a "lowerdir+" layer, plus the upperdir/workdir fds if any,
+                 * kept open (rather than closed at the end of their loop iteration) so that, if the
+                 * primary "lowerdir+" attempt below fails with EINVAL, we can still refer to them via
+                 * FORMAT_PROC_FD_PATH() to build the legacy joined "lowerdir=" fallback. */
+                _cleanup_free_ int *lower_fds = NULL;
+                size_t n_lower_fds = 0;
+                int upperdir_fd = -EBADF, workdir_fd = -EBADF;
 
                 /* Kernel expects the stack in reverse order, hence go from back to front */
                 for (size_t i = mstack->n_mounts; i > 0; i--) {
@@ -864,6 +905,10 @@ static int mstack_make_overlayfs(
                                                 log_debug_errno(r, "Failed to set mount layer lowerdir+=%s/data: %m", m->what);
                                                 report_errno_and_exit(errno_pipe_fds[1], r);
                                         }
+
+                                        if (!GREEDY_REALLOC(lower_fds, n_lower_fds + 1))
+                                                report_errno_and_exit(errno_pipe_fds[1], -ENOMEM);
+                                        lower_fds[n_lower_fds++] = TAKE_FD(data_fd);
                                 } else {
                                         /* 'data'/'work' were already created (if missing) on the pre-clone
                                          * source above, so just open them here. */
@@ -903,6 +948,9 @@ static int mstack_make_overlayfs(
                                                 report_errno_and_exit(errno_pipe_fds[1], r);
                                         }
 
+                                        upperdir_fd = TAKE_FD(data_fd);
+                                        workdir_fd = TAKE_FD(work_fd);
+
                                         break;
                                 }
                                 break;
@@ -920,6 +968,10 @@ static int mstack_make_overlayfs(
                                         report_errno_and_exit(errno_pipe_fds[1], r);
                                 }
 
+                                if (!GREEDY_REALLOC(lower_fds, n_lower_fds + 1))
+                                        report_errno_and_exit(errno_pipe_fds[1], -ENOMEM);
+                                lower_fds[n_lower_fds++] = TAKE_FD(temp_fd);
+
                                 break;
 
                         default:
@@ -927,33 +979,43 @@ static int mstack_make_overlayfs(
                         }
                 }
 
-                if (!writable && fsconfig(sb_fd, FSCONFIG_SET_FLAG, "ro", /* value= */ NULL, /* aux= */ 0) < 0) {
-                        log_debug_errno(errno, "Failed to set read-only mount flag: %m");
-                        report_errno_and_exit(errno_pipe_fds[1], -errno);
-                }
+                r = mstack_overlayfs_create(sb_fd, writable, mstack->path);
+                if (r == -EINVAL && n_lower_fds > 0) {
+                        log_debug_errno(r, "Failed to realize overlayfs via incremental 'lowerdir+', retrying with a single joined 'lowerdir=': %m");
 
-                if (fsconfig(sb_fd, FSCONFIG_SET_FLAG, "userxattr", /* value= */ NULL, /* aux= */ 0) < 0) {
-                        log_debug_errno(errno, "Failed to set userxattr mount flag: %m");
-                        report_errno_and_exit(errno_pipe_fds[1], -errno);
-                }
+                        _cleanup_strv_free_ char **lower_paths = NULL;
+                        FOREACH_ARRAY(fd, lower_fds, n_lower_fds)
+                                if (strv_extend(&lower_paths, FORMAT_PROC_FD_PATH(*fd)) < 0)
+                                        report_errno_and_exit(errno_pipe_fds[1], -ENOMEM);
 
-                if (fsconfig(sb_fd, FSCONFIG_SET_STRING, "source", mstack->path, /* aux= */ 0) < 0) {
-                        log_debug_errno(errno, "Failed to set mount source: %m");
-                        report_errno_and_exit(errno_pipe_fds[1], -errno);
-                }
+                        _cleanup_free_ char *joined = strv_join(lower_paths, ":");
+                        if (!joined)
+                                report_errno_and_exit(errno_pipe_fds[1], -ENOMEM);
 
-                /* This is where the superblock is materialized. It must be called from the child's
-                 * namespace, where the mounts are attached as described above, otherwise overlayfs is
-                 * unhappy and will refuse the superblock to be created. */
-                if (fsconfig(sb_fd, FSCONFIG_CMD_CREATE, /* key= */ NULL, /* value= */ NULL, /* aux= */ 0) < 0) {
-                        log_debug_errno(errno, "Failed to realize overlayfs: %m");
-                        report_errno_and_exit(errno_pipe_fds[1], -errno);
+                        if (fsconfig(sb_fd_fallback, FSCONFIG_SET_STRING, "lowerdir", joined, /* aux= */ 0) < 0)
+                                report_errno_and_exit(errno_pipe_fds[1], -errno);
+
+                        if (upperdir_fd >= 0 &&
+                            fsconfig(sb_fd_fallback, FSCONFIG_SET_STRING, "upperdir", FORMAT_PROC_FD_PATH(upperdir_fd), /* aux= */ 0) < 0)
+                                report_errno_and_exit(errno_pipe_fds[1], -errno);
+
+                        if (workdir_fd >= 0 &&
+                            fsconfig(sb_fd_fallback, FSCONFIG_SET_STRING, "workdir", FORMAT_PROC_FD_PATH(workdir_fd), /* aux= */ 0) < 0)
+                                report_errno_and_exit(errno_pipe_fds[1], -errno);
+
+                        r = mstack_overlayfs_create(sb_fd_fallback, writable, mstack->path);
                 }
+                if (r < 0)
+                        report_errno_and_exit(errno_pipe_fds[1], r);
 
                 report_errno_and_exit(errno_pipe_fds[1], 0);
         }
 
+        /* The child above realizes whichever of the two superblocks actually worked (see the
+         * "lowerdir+" EINVAL fallback there); try the primary one first, then the fallback. */
         _cleanup_close_ int overlayfs_mnt_fd = fsmount(sb_fd, FSMOUNT_CLOEXEC, 0);
+        if (overlayfs_mnt_fd < 0)
+                overlayfs_mnt_fd = fsmount(sb_fd_fallback, FSMOUNT_CLOEXEC, 0);
         if (overlayfs_mnt_fd < 0)
                 return log_debug_errno(errno, "Failed to create mount fd: %m");
 
