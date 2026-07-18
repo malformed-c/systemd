@@ -4237,8 +4237,17 @@ static int outer_child(
                 /* AT_RECURSIVE: 'directory' may already have submounts of its own (e.g. a separately
                  * mounted /usr/) from whichever of the three mechanisms further up attached the root;
                  * without it, open_tree() would silently drop them from the clone, leaving empty
-                 * mountpoint directories behind in the assembled --volatile= result. */
+                 * mountpoint directories behind in the assembled --volatile= result. The kernel refuses
+                 * a recursive clone outright (EINVAL) if the subtree contains a locked/unbindable mount
+                 * anywhere in it, though - always possible for --directory=/, which may drag along the
+                 * host's entire live mount tree (/proc, /sys, container-private mounts, ...); fall back
+                 * to a non-recursive clone in that case; losing nested submounts is a smaller regression
+                 * than failing --volatile= outright for such a root. */
                 _cleanup_close_ int root_fd = open_tree(-1, directory, OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_RECURSIVE|AT_SYMLINK_NOFOLLOW);
+                if (root_fd < 0 && errno == EINVAL) {
+                        log_debug("Recursive clone of '%s' refused (locked or unbindable submounts?), falling back to non-recursive clone; nested submounts will not be preserved.", directory);
+                        root_fd = open_tree(-1, directory, OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_SYMLINK_NOFOLLOW);
+                }
                 if (root_fd < 0)
                         return log_error_errno(errno, "Failed to clone root directory '%s': %m", directory);
 

@@ -399,6 +399,17 @@ TEST(mstack_root_overlay_unification) {
         if (running_in_chroot() > 0)
                 return (void) log_tests_skipped("running in chroot(), skipping root/ unification test.");
 
+        /* pidref_safe_fork() blocks further dlopen() in the child by default. The has_tmpfs_root blocks
+         * below go through mstack_make_tmpfs() -> make_fsmount() -> mount_option_mangle(), which lazily
+         * dlopen()s libmount; warm that up here in the parent first. Unlike TEST(mstack) above, this
+         * can't rely on that TEST's own warm-up having already run first in the same process - systemd's
+         * test framework doesn't guarantee TEST() execution follows declaration order. */
+        {
+                unsigned long mf;
+                _cleanup_free_ char *mo = NULL;
+                (void) mount_option_mangle("mode=0755", 0, &mf, &mo);
+        }
+
         /* Full assembly: root/'s own content and layer@0's content must both be visible (merged across
          * the whole tree, not just /usr/), and a write outside /usr/ must land in rw/'s upperdir on the
          * host - not fail outright, and not silently mutate root/'s own source directory (the bug

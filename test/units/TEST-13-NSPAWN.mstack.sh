@@ -18,6 +18,7 @@ at_exit() {
   [[ -n "${VAR_SRC:-}" ]]    && rm -rf "$VAR_SRC"
   [[ -n "${BIND_SRC:-}" ]]   && rm -rf "$BIND_SRC"
   [[ -n "${ROOT_SRC:-}" ]]   && rm -rf "$ROOT_SRC"
+  [[ -n "${TMPFS_RO_DIR:-}" ]] && rm -rf "$TMPFS_RO_DIR"
 }
 
 trap at_exit EXIT
@@ -167,6 +168,10 @@ else
     PASS=$((PASS+1))
   fi
 fi
+# rw/ must be gone before the next section: .mstack/ rw/ and --volatile= are mutually exclusive
+# (nspawn refuses the combination outright), so a leftover rw/ here would make every check below
+# fail on that refusal instead of what they're actually testing.
+rm -rf "$MSTACK_DIR/rw"
 
 echo "=== root/ + --volatile=yes ==="
 # Regression test: /usr/ is extracted from the fully assembled tree (root/ folded in, per above)
@@ -180,7 +185,7 @@ check "/usr/ read-only with root/ + --volatile=yes" "/usr type.*ro" "$OUT"
 ROOT_MARKER_YES=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile cat /etc/root-marker.txt 2>&1 || true)
 check "root/'s own content (outside /usr/) absent with --volatile=yes" "No such file or directory" "$ROOT_MARKER_YES"
 
-rm -rf "$MSTACK_DIR/rw" "$MSTACK_DIR/root" "$ROOT_SRC"
+rm -rf "$MSTACK_DIR/root" "$ROOT_SRC"
 
 echo "=== --read-only ==="
 OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --read-only mount | grep "/ type\|/config\|/writable" || true)
@@ -228,11 +233,23 @@ mkdir -p "$MSTACK_DIR/tmpfs@extra"
 
 # tmpfs@ mount points, like bind@/robind@, are created on demand under MSTACK_DEFER_MOUNT: their
 # parent directory is pre-created while root is still writable (see the pre-create loop in
-# mstack_bind_mounts() in mstack.c), so this works even on an otherwise read-only root - no
-# --volatile= needed just to create the new top-level /extra mountpoint.
-OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" mount | grep "/ type\|/extra type" || true)
+# mstack_bind_mounts() in mstack.c). That only helps if root has an upperdir to actually create the
+# new /extra mountpoint directory in, though - a bare layer@-only overlay with no rw/ (what
+# $MSTACK_DIR is at this point: layer@0/1/2, no root/, no rw/) has no upperdir at all, so it can't
+# create anything new any more than bind@ can (see "Missing target directory on read-only rootfs"
+# below) - use an isolated root/-only .mstack/ instead (reusing layer@0's content, so "mount" is
+# actually available inside), which - unlike an overlay - is a plain bind of a real (and thus
+# genuinely writable) directory right up until mstack_apply_attr() marks it read-only afterwards,
+# so the pre-create loop's mkdir has somewhere to actually land.
+TMPFS_RO_DIR="$(mktemp -d)"
+ln -s "$LAYERS_DIR/layer@0" "$TMPFS_RO_DIR/root"
+mkdir -p "$TMPFS_RO_DIR/tmpfs@extra"
+
+OUT=$(systemd-nspawn --pipe --mstack "$TMPFS_RO_DIR" mount | grep "/ type\|/extra type" || true)
 check "root stays ro with tmpfs@ present" "/ type.*ro" "$OUT"
 check "tmpfs@extra mounts a fresh tmpfs on a read-only root" "/extra type.*rw" "$OUT"
+
+rm -rf "$TMPFS_RO_DIR"
 
 OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay mount | grep "/extra type" || true)
 check "tmpfs@extra mounts a fresh tmpfs" "/extra type.*rw" "$OUT"
