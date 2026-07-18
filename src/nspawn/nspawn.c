@@ -4141,6 +4141,15 @@ static int outer_child(
         if (in_child_chown()) {
                 chown_uid = arg_uid_shift;
                 chown_range = arg_uid_range;
+        } else if (arg_mstack && uid_is_valid(arg_mstack_uid_shift)) {
+                /* --mstack-uid-shift= idmaps mstack's own read-only layers, but everything nspawn itself
+                 * still writes into the assembled root from here on (base_filesystem_create(), custom
+                 * --bind= mountpoints, the journal directory, ...) runs as plain host root, entirely
+                 * separate from mstack's own idmap and unaffected by it. Chown what we create to the same
+                 * shift instead, so newly-created content ends up consistently owned rather than left as
+                 * host root - matches the "0 means no shift needed" convention below either way. */
+                chown_uid = arg_mstack_uid_shift;
+                chown_range = MSTACK_UID_SHIFT_RANGE;
         } else {
                 chown_uid = 0;
                 chown_range = UINT32_C(0x10000);
