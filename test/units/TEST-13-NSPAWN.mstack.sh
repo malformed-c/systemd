@@ -17,6 +17,7 @@ at_exit() {
   [[ -n "${CONFIG_SRC:-}" ]] && rm -rf "$CONFIG_SRC"
   [[ -n "${VAR_SRC:-}" ]]    && rm -rf "$VAR_SRC"
   [[ -n "${BIND_SRC:-}" ]]   && rm -rf "$BIND_SRC"
+  [[ -n "${ROOT_SRC:-}" ]]   && rm -rf "$ROOT_SRC"
 }
 
 trap at_exit EXIT
@@ -132,6 +133,55 @@ else
 fi
 rm -rf "$MSTACK_DIR/rw"
 
+echo "=== root/ + layer@ + rw/ ==="
+# root/ folds into the same overlay as layer@/rw as its base layer, rather than being mounted
+# separately with only a /usr-only overlay submount on top of it - the whole tree (not just /usr/)
+# goes through rw/'s copy-on-write mechanism, and root/'s own content merges with layer@ content
+# across the whole tree.
+ROOT_SRC="$(mktemp -d)"
+mkdir -p "$ROOT_SRC/etc"
+echo "root-etc-marker" > "$ROOT_SRC/etc/root-marker.txt"
+ln -s "$ROOT_SRC" "$MSTACK_DIR/root"
+mkdir -p "$MSTACK_DIR/rw"
+
+if ! systemd-nspawn --pipe --mstack "$MSTACK_DIR" true 2>/dev/null; then
+  echo "SKIP: root/+layer@+rw/ overlay not supported in this environment, skipping"
+else
+  ROOT_MARKER=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" cat /etc/root-marker.txt || true)
+  check "root/'s own content visible" "root-etc-marker" "$ROOT_MARKER"
+
+  LAYER_MARKER=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" cat /marker.txt || true)
+  check "layer@1 content visible alongside root/" "layer1" "$LAYER_MARKER"
+
+  # Write outside /usr/ (unrelated to any layer@ content) must land in rw/, not fail, and not
+  # mutate root/'s own source directory on the host.
+  systemd-nspawn --pipe --mstack "$MSTACK_DIR" sh -c 'echo written > /etc/new-file.txt'
+  NEW_FILE=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" cat /etc/new-file.txt || true)
+  check "write outside /usr/ persists via rw/" "written" "$NEW_FILE"
+
+  if [[ -e "$ROOT_SRC/etc/new-file.txt" ]]; then
+    echo "FAIL: write outside /usr/ leaked into root/'s own source directory on the host"
+    FAIL=$((FAIL+1))
+  else
+    echo "PASS: root/'s own source directory on the host stayed untouched"
+    PASS=$((PASS+1))
+  fi
+fi
+
+echo "=== root/ + --volatile=yes ==="
+# Regression test: /usr/ is extracted from the fully assembled tree (root/ folded in, per above)
+# after mstack_make_mounts() runs; the throwaway root this produces must stay writable (a stale
+# mstack->root_mount pointer once made mstack_bind_mounts() think it still had to protect a real
+# root/ entry, incorrectly leaving the fresh tmpfs read-only and breaking container startup).
+OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile mount | grep "/ type\|/usr type" || true)
+check "root writable with root/ + --volatile=yes" "/ type.*rw" "$OUT"
+check "/usr/ read-only with root/ + --volatile=yes" "/usr type.*ro" "$OUT"
+
+ROOT_MARKER_YES=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile cat /etc/root-marker.txt 2>&1 || true)
+check "root/'s own content (outside /usr/) absent with --volatile=yes" "No such file or directory" "$ROOT_MARKER_YES"
+
+rm -rf "$MSTACK_DIR/rw" "$MSTACK_DIR/root" "$ROOT_SRC"
+
 echo "=== --read-only ==="
 OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --read-only mount | grep "/ type\|/config\|/writable" || true)
 check "root ro with --read-only"        "/ type.*ro"         "$OUT"
@@ -159,12 +209,30 @@ MARKER=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay cat /ma
 check "layer@1 marker visible with --volatile=overlay" "layer1" "$MARKER"
 
 echo "=== --volatile=state ==="
-OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=state mount | grep "/ type\|/config\|/writable" || true)
+OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=state mount | grep "/ type\|/config\|/writable\|/var type" || true)
 check "root ro with --volatile=state" "/ type.*ro"         "$OUT"
+check "/var is a fresh tmpfs"         "/var type.*rw"       "$OUT"
 check "bind@writable rw"              "/writable type.*rw" "$OUT"
 check "robind@config ro"              "/config type.*ro"   "$OUT"
 MARKER=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=state cat /marker.txt || true)
 check "layer@1 marker visible with --volatile=state" "layer1" "$MARKER"
+
+# --volatile=state's /var is a synthetic tmpfs@ entry realized fresh on every invocation (see
+# mstack_merge_volatile() in mstack.c) - writes to it must never survive across invocations.
+systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=state sh -c 'echo "should-not-persist" > /var/state-write-test.txt'
+STATE_WRITE=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=state cat /var/state-write-test.txt 2>&1 || true)
+check "writes to --volatile=state's /var are discarded" "No such file or directory" "$STATE_WRITE"
+
+echo "=== tmpfs@ entry ==="
+# tmpfs@ mount points, like bind@/robind@, are created on demand - that needs a writable root
+# to create the new top-level /extra directory in, hence --volatile=overlay here.
+mkdir -p "$MSTACK_DIR/tmpfs@extra"
+OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay mount | grep "/extra type" || true)
+check "tmpfs@extra mounts a fresh tmpfs" "/extra type.*rw" "$OUT"
+systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay sh -c 'echo "should-not-persist" > /extra/tmpfs-write-test.txt'
+TMPFS_WRITE=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay cat /extra/tmpfs-write-test.txt 2>&1 || true)
+check "writes to tmpfs@ entries are discarded" "No such file or directory" "$TMPFS_WRITE"
+rm -rf "$MSTACK_DIR/tmpfs@extra"
 
 echo "=== Missing target directory on read-only rootfs ==="
 ln -s "$BIND_SRC" "$MSTACK_DIR/bind@missing-target-dir"

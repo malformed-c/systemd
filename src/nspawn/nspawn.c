@@ -8,7 +8,7 @@
 #include <sys/keyctl.h>
 #include <sys/mount.h>
 #include <sys/personality.h>
-#include <sys/prctl.h>
+#include <sys/prctl.h> /* IWYU pragma: keep */
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -20,9 +20,11 @@
 #include "sd-path.h"
 #include "sd-varlink.h"
 
+#include "acl-util.h"
 #include "alloc-util.h"
 #include "barrier.h"
 #include "base-filesystem.h"
+#include "blkid-util.h"
 #include "btrfs-util.h"
 #include "build.h"
 #include "bus-error.h"
@@ -36,12 +38,13 @@
 #include "constants.h"
 #include "copy.h"
 #include "cpu-set-util.h"
+#include "crypto-util.h"
+#include "cryptsetup-util.h"
 #include "daemon-util.h"
 #include "dev-setup.h"
 #include "devnum-util.h"
 #include "discover-image.h"
 #include "dissect-image.h"
-#include "dlfcn-util.h"
 #include "env-util.h"
 #include "escape.h"
 #include "ether-addr-util.h"
@@ -76,6 +79,7 @@
 #include "namespace-util.h"
 #include "netlink-internal.h"
 #include "notify-recv.h"
+#include "nspawn.h"
 #include "nspawn-bind-user.h"
 #include "nspawn-cgroup.h"
 #include "nspawn-expose-ports.h"
@@ -87,14 +91,13 @@
 #include "nspawn-settings.h"
 #include "nspawn-setuid.h"
 #include "nspawn-stub-pid1.h"
-#include "nspawn.h"
 #include "nsresource.h"
-#include "os-util.h"
-#include "parse-helpers.h"
-#include "osc-context.h"
 #include "options.h"
+#include "os-util.h"
+#include "osc-context.h"
 #include "pager.h"
 #include "parse-argument.h"
+#include "parse-helpers.h"
 #include "parse-util.h"
 #include "path-lookup.h"
 #include "path-util.h"
@@ -1882,7 +1885,7 @@ static int setup_timezone(const char *dest) {
 
         case TIMEZONE_COPY:
                 /* If mounting failed, try to copy */
-                r = copy_file_atomic("/etc/localtime", where, 0644, COPY_REFLINK|COPY_REPLACE);
+                r = copy_file_atomic("/etc/localtime", where, 0644, COPY_REPLACE);
                 if (r < 0) {
                         log_full_errno(ERRNO_IS_NEG_FS_WRITE_REFUSED(r) ? LOG_DEBUG : LOG_WARNING, r,
                                        "Failed to copy /etc/localtime to %s, ignoring: %m", where);
@@ -2010,9 +2013,9 @@ static int setup_resolv_conf(const char *dest) {
         }
 
         if (IN_SET(m, RESOLV_CONF_REPLACE_HOST, RESOLV_CONF_REPLACE_STATIC, RESOLV_CONF_REPLACE_UPLINK, RESOLV_CONF_REPLACE_STUB))
-                r = copy_file_atomic(what, where, 0644, COPY_REFLINK|COPY_REPLACE);
+                r = copy_file_atomic(what, where, 0644, COPY_REPLACE);
         else
-                r = copy_file(what, where, O_TRUNC|O_NOFOLLOW, 0644, COPY_REFLINK);
+                r = copy_file(what, where, O_TRUNC|O_NOFOLLOW, 0644, /* copy_flags= */ 0);
         if (r < 0) {
                 /* If the file already exists as symlink, let's suppress the warning, under the assumption that
                  * resolved or something similar runs inside and the symlink points there.
@@ -2237,9 +2240,9 @@ static int make_extra_nodes(const char *dest) {
         FOREACH_ARRAY(node, arg_extra_nodes, arg_n_extra_nodes) {
                 _cleanup_free_ char *path = NULL;
 
-                path = path_join(dest, node->path);
-                if (!path)
-                        return log_oom();
+                r = chase(node->path, dest, CHASE_PREFIX_ROOT|CHASE_NONEXISTENT|CHASE_NOFOLLOW, &path, /* ret_fd= */ NULL);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to resolve device node path '%s': %m", node->path);
 
                 dev_t dev = S_ISCHR(node->mode) || S_ISBLK(node->mode) ? makedev(node->major, node->minor) : 0;
                 if (mknod(path, node->mode, dev) < 0)
@@ -3584,8 +3587,9 @@ static int inner_child(
 
         /* Make sure we keep the caps across the uid/gid dropping, so that we can retain some selected caps
          * if we need to later on. */
-        if (prctl(PR_SET_KEEPCAPS, 1) < 0)
-                return log_error_errno(errno, "Failed to set PR_SET_KEEPCAPS: %m");
+        r = prctl_safe(PR_SET_KEEPCAPS, 1, 0, 0, 0);
+        if (r < 0)
+                return log_error_errno(r, "Failed to set PR_SET_KEEPCAPS: %m");
 
         if (uid_is_valid(arg_uid) || gid_is_valid(arg_gid))
                 r = change_uid_gid_raw(arg_uid, arg_gid, arg_supplementary_gids, arg_n_supplementary_gids, arg_console_mode != CONSOLE_PIPE);
@@ -3598,9 +3602,11 @@ static int inner_child(
         if (r < 0)
                 return log_error_errno(r, "Dropping capabilities failed: %m");
 
-        if (arg_no_new_privileges)
-                if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
-                        return log_error_errno(errno, "Failed to disable new privileges: %m");
+        if (arg_no_new_privileges) {
+                r = proc_set_nnp();
+                if (r < 0)
+                        return log_error_errno(r, "Failed to disable new privileges: %m");
+        }
 
         /* LXC sets container=lxc, so follow the scheme here */
         envp[n_env++] = strjoina("container=", arg_container_service_name);
@@ -3924,25 +3930,28 @@ static DissectImageFlags determine_dissect_image_flags(void) {
                  (arg_userns_ownership != USER_NAMESPACE_OWNERSHIP_AUTO) ? DISSECT_IMAGE_IDENTITY_UID : 0);
 }
 
-static int apply_deferred_mstack_bind_mounts(MStack *mstack, const char *directory, MStackFlags flags) {
+static int mstack_apply_bind_mounts_late(MStack *mstack, const char *directory, MStackFlags flags) {
         int r;
 
-        /* Open an O_PATH fd anchored to the staged container root so that
-         * mstack_apply_bind_mounts() can use chaseat() to safely resolve bind
-         * target paths relative to it, without symlink escape risk. */
+        /* mstack's bind@/robind@/tmpfs@ entries are always applied here, after mount_all(), rather than
+         * during the initial root assembly above - mount_all() mounts fresh API VFS filesystems (/proc,
+         * /dev, /run, /tmp, /sys), which would otherwise shadow any of these at the same paths. This is
+         * unconditional and unrelated to --volatile= specifically: mstack is authoritative for ordering
+         * regardless of whether --volatile= is in play, so a synthetic --volatile=overlay rw layer (see
+         * mstack_merge_volatile()) is already part of the root assembled above, and bind@/robind@/tmpfs@
+         * naturally end up on top of it here, without needing any volatile-specific handling of their own.
+         *
+         * Open an O_PATH fd anchored to the staged container root so that mstack_apply_bind_mounts() can
+         * use chaseat() to safely resolve bind target paths relative to it, without symlink escape risk. */
         _cleanup_close_ int root_fd = open(directory, O_CLOEXEC|O_PATH|O_DIRECTORY|O_NOFOLLOW);
         if (root_fd < 0)
-                return log_error_errno(errno, "Failed to open container root for deferred mstack mount: %m");
+                return log_error_errno(errno, "Failed to open container root for mstack bind mounts: %m");
 
-        /* Apply .mstack bind mounts that were deferred to avoid being masked by the
-         * volatile overlay. We pass directory as the mount root so
-         * bind targets are constructed against the staged container root rather than
-         * the host filesystem. */
         r = mstack_apply_bind_mounts(mstack, root_fd, directory, flags);
         if (r < 0)
                 return r;
 
-        log_debug("Applied deferred .mstack bind mounts.");
+        log_debug("Applied .mstack bind mounts.");
 
         return 0;
 }
@@ -3990,8 +3999,9 @@ static int outer_child(
         if (r < 0)
                 log_debug_errno(r, "Failed to read os-release from host for container, ignoring: %m");
 
-        if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
-                return log_error_errno(errno, "PR_SET_PDEATHSIG failed: %m");
+        r = prctl_safe(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+        if (r < 0)
+                return log_error_errno(r, "PR_SET_PDEATHSIG failed: %m");
 
         r = reset_audit_loginuid();
         if (r < 0)
@@ -4067,6 +4077,25 @@ static int outer_child(
                         return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                         "Cannot combine .mstack/ rw/ directory with --volatile=. "
                                         "Use either rw/ for persistent state or --volatile= for ephemeral writes, not both.");
+
+                /* Let mstack itself be authoritative for --volatile=, instead of layering a separate
+                 * volatile mount on top of the finished tree afterwards: merge the requested mode's
+                 * layers into the loaded mount stack before assembling it, so bind@/robind@/tmpfs@
+                 * entries (applied later, see mstack_apply_bind_mounts() below) naturally end up on top
+                 * of it via mstack's own ordering, rather than being masked by a volatile mount applied
+                 * outside mstack's purview afterwards. */
+                r = mstack_merge_volatile(mstack, arg_volatile_mode, /* tmpfs_uid_shift= */ UID_INVALID, arg_selinux_apifs_context);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to merge --volatile= into .mstack/ mount stack: %m");
+
+                /* --volatile= is always forced together with arg_read_only (see the argument
+                 * post-processing above), but - matching prior behavior - that never actually makes a
+                 * volatile mount read-only: it's mstack's own synthetic writable layer (added by
+                 * mstack_merge_volatile() above for --volatile=overlay) that must stay writable
+                 * regardless. Only bind@/robind@ mounts distinguish explicit --read-only via
+                 * MSTACK_BINDS_RDONLY, set above independently of this. */
+                if (arg_volatile_mode != VOLATILE_NO)
+                        mstack_flags &= ~MSTACK_RDONLY;
 
                 /* This creates the needed overlayfs or tmpfs, owned by our target userns. Note that we pass
                  * the target mount dir as temporary mount dir here. We after all just need some dir here
@@ -4157,6 +4186,19 @@ static int outer_child(
                          "Selected user namespace base " UID_FMT " and range " UID_FMT ".", arg_uid_shift, arg_uid_range);
         }
 
+        /* chown_uid wasn't known yet when the --mstack= case merged --volatile= into 'mstack' above (that
+         * has to happen before the root is even attached, well before this point) - patch in the now-known
+         * uid=/gid= tmpfs parity for any tmpfs mstack_merge_volatile() may still go on to realize (its
+         * synthetic --volatile=overlay rw layer, or a --volatile=state tmpfs@/var, both created later via
+         * mstack_make_mounts()/mstack_apply_bind_mounts()). Matches upstream's existing "0 means no shift
+         * needed" convention for uid_shift. */
+        if (arg_mstack) {
+                mstack->tmpfs_uid_shift = chown_uid == 0 ? UID_INVALID : chown_uid;
+                r = free_and_strdup_warn(&mstack->tmpfs_selinux_context, arg_selinux_apifs_context);
+                if (r < 0)
+                        return r;
+        }
+
         /* So the whole tree is now MS_SLAVE, i.e. we'll still receive mount/umount events from the host
          * mount namespace. For the directory we are going to run our container let's turn this off, so that
          * we'll live in our own little world from now on, and propagation from the host may only happen via
@@ -4172,13 +4214,40 @@ static int outer_child(
         if (r < 0)
                 return r;
 
-        r = setup_volatile_mode(
-                        directory,
-                        arg_volatile_mode,
-                        chown_uid,
-                        arg_selinux_apifs_context);
-        if (r < 0)
-                return r;
+        _cleanup_(mstack_freep) MStack *synthetic_mstack = NULL;
+        if (!arg_mstack && arg_volatile_mode != VOLATILE_NO) {
+                /* Neither --directory= nor --image= have a mount stack of their own; wrap the already
+                 * attached root as a synthetic single-entry MStack and merge the requested --volatile=
+                 * layers into it exactly as the --mstack= case does above, then run it through the same
+                 * assembly/bind-application pipeline (MSTACK_DEFER_MOUNT so tmpfs@/bind@ realization
+                 * stays correctly ordered after remount_idmap() below, same as the --mstack= case). */
+                _cleanup_close_ int root_fd = open_tree(-1, directory, OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_SYMLINK_NOFOLLOW);
+                if (root_fd < 0)
+                        return log_error_errno(errno, "Failed to clone root directory '%s': %m", directory);
+
+                r = mstack_new_from_root_fd(TAKE_FD(root_fd), &synthetic_mstack);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to wrap root directory as a synthetic mount stack: %m");
+
+                r = mstack_merge_volatile(synthetic_mstack, arg_volatile_mode, chown_uid == 0 ? UID_INVALID : chown_uid, arg_selinux_apifs_context);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to merge --volatile= into synthetic mount stack: %m");
+
+                mstack_flags = MSTACK_DEFER_MOUNT;
+
+                r = mstack_make_mounts(synthetic_mstack, /* temp_mount_dir= */ directory, mstack_flags,
+                                       /* uid_shift= */ UID_INVALID); /* nspawn does its own idmapping separately, via --private-users= */
+                if (r < 0)
+                        return log_error_errno(r, "Failed to make synthetic --volatile= mounts: %m");
+
+                r = mstack_bind_mounts(synthetic_mstack, directory, /* where_fd= */ -EBADF, mstack_flags, /* ret_root_fd= */ NULL);
+                if (r < 0)
+                        return log_error_errno(r, "Failed to bind synthetic --volatile= mounts: %m");
+
+                /* Downstream code (the deferred bind/tmpfs@ application below, after mount_all()) treats
+                 * any non-NULL 'mstack' uniformly, regardless of whether it came from --mstack= or here. */
+                mstack = synthetic_mstack;
+        }
 
         _cleanup_(machine_bind_user_context_freep) MachineBindUserContext *bind_user_context = NULL;
         r = machine_bind_user_prepare(
@@ -4306,14 +4375,6 @@ static int outer_child(
                 }
         }
 
-        r = setup_volatile_mode_after_remount_idmap(
-                        directory,
-                        arg_volatile_mode,
-                        chown_uid,
-                        arg_selinux_apifs_context);
-        if (r < 0)
-                return r;
-
         if (dissected_image) {
                 /* Now we know the uid shift, let's now mount everything else that might be in the image. */
                 r = dissected_image_mount_and_warn(
@@ -4418,12 +4479,12 @@ static int outer_child(
         if (r < 0)
                 return r;
 
-        /* Apply deferred mstack bind mounts after mount_all() so they land on top
-         * of API VFS mounts rather than being shadowed by them. */
+        /* Apply mstack bind mounts after mount_all() so they land on top of API VFS mounts rather than
+         * being shadowed by them. 'mstack' is set here whenever the root came from a mount stack -
+         * either loaded from a .mstack/ directory (arg_mstack) or synthesized above from a plain
+         * --directory=/--image= root for --volatile= (see synthetic_mstack above). */
         if (mstack) {
-                assert(arg_mstack);
-
-                r = apply_deferred_mstack_bind_mounts(mstack, directory, mstack_flags);
+                r = mstack_apply_bind_mounts_late(mstack, directory, mstack_flags);
                 if (r < 0)
                         return r;
         }
@@ -6227,9 +6288,13 @@ static int run(int argc, char *argv[]) {
         if (arg_cleanup)
                 return do_cleanup();
 
-        (void) DLOPEN_LIBMOUNT(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
-        (void) DLOPEN_LIBSECCOMP(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
-        (void) DLOPEN_LIBSELINUX(LOG_DEBUG, SD_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED);
+        (void) DLOPEN_CRYPTSETUP(LOG_DEBUG, suggested);
+        (void) DLOPEN_LIBACL(LOG_DEBUG, recommended);
+        (void) DLOPEN_LIBBLKID(LOG_DEBUG, recommended);
+        (void) DLOPEN_LIBCRYPTO(LOG_WARNING, recommended);
+        (void) DLOPEN_LIBMOUNT(LOG_DEBUG, recommended);
+        (void) DLOPEN_LIBSECCOMP(LOG_DEBUG, recommended);
+        (void) DLOPEN_LIBSELINUX(LOG_DEBUG, recommended);
 
         r = cg_has_legacy();
         if (r < 0)
@@ -6543,7 +6608,7 @@ static int run(int argc, char *argv[]) {
                         {
                                 BLOCK_SIGNALS(SIGINT);
                                 r = copy_file(arg_image, np, O_EXCL, arg_read_only ? 0400 : 0600,
-                                              COPY_REFLINK|COPY_CRTIME|COPY_SIGINT|COPY_NOCOW_AFTER);
+                                              COPY_CRTIME|COPY_SIGINT|COPY_NOCOW_AFTER);
                         }
                         if (r == -EINTR) {
                                 log_error_errno(r, "Interrupted while copying image file to %s, removed again.", np);
