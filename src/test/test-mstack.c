@@ -513,6 +513,142 @@ TEST(mstack_root_overlay_unification) {
                         _exit(EXIT_SUCCESS);
                 }
         }
+
+        /* has_tmpfs_root (e.g. bind@-only, no root/layer@/rw) merged with --volatile=overlay: a real bug
+         * where mstack_normalize()'s single-layer collapse converted the synthetic, still-unbacked rw
+         * layer into a MSTACK_BIND at "/" with no valid fd to bind-mount, breaking root resolution. The
+         * synthetic layer must instead be dropped, falling back to has_tmpfs_root's own unconditional
+         * fresh-tmpfs creation - the same end result the bind mount would have produced, once realized. */
+        {
+                _cleanup_(rm_rf_physical_and_freep) char *t = NULL;
+                _cleanup_close_ int tfd = -EBADF;
+                tfd = mkdtemp_open("/tmp/mstack-tmpfsroot-volatile-overlay-XXXXXX", O_PATH, &t);
+                ASSERT_OK(tfd);
+
+                ASSERT_OK_ERRNO(mkdirat(tfd, "bind@somewhere", 0755));
+
+                _cleanup_(mstack_freep) MStack *mstack = NULL;
+                ASSERT_OK(mstack_load(t, tfd, &mstack));
+                ASSERT_TRUE(mstack->has_tmpfs_root);
+                ASSERT_FALSE(mstack->root_mount);
+                ASSERT_EQ(mstack->n_mounts, 1u); /* just bind@somewhere */
+
+                ASSERT_OK(mstack_merge_volatile(mstack, VOLATILE_OVERLAY, UID_INVALID, /* tmpfs_selinux_context= */ NULL));
+
+                ASSERT_TRUE(mstack->has_tmpfs_root);
+                ASSERT_FALSE(mstack->has_overlayfs);
+                ASSERT_FALSE(mstack->root_mount);
+                ASSERT_EQ(mstack->n_mounts, 1u); /* the synthetic rw layer was dropped, not left dangling */
+                ASSERT_EQ(mstack->mounts[0].mount_type, MSTACK_BIND);
+
+                if (!have_effective_cap(CAP_SYS_ADMIN))
+                        return (void) log_tests_skipped("not attaching mstack, lacking privs");
+                if (!mount_new_api_supported())
+                        return (void) log_tests_skipped("kernel does not support new mount API, skipping has_tmpfs_root+overlay test.");
+                if (running_in_chroot() > 0)
+                        return (void) log_tests_skipped("running in chroot(), skipping has_tmpfs_root+overlay test.");
+
+                /* mstack (loaded/merged above, in the parent's original mount namespace) isn't reused
+                 * here - its bind@ entry's what_fd was opened before the fork, and later mount operations
+                 * on it fail with EINVAL once inside the child's new mount namespace (FORK_NEW_MOUNTNS).
+                 * Every other privileged test in this file avoids this by loading fresh inside the child;
+                 * follow the same pattern. */
+                mstack = mstack_free(mstack);
+
+                int r = pidref_safe_fork("(mstack-tmpfsroot-vol)", FORK_DEATHSIG_SIGTERM|FORK_LOG|FORK_WAIT|FORK_NEW_MOUNTNS|FORK_MOUNTNS_SLAVE, /* ret= */ NULL);
+                ASSERT_OK(r);
+
+                if (r == 0) {
+                        tfd = safe_close(tfd);
+
+                        ASSERT_OK(mstack_load(t, -EBADF, &mstack));
+                        ASSERT_OK(mstack_merge_volatile(mstack, VOLATILE_OVERLAY, UID_INVALID, /* tmpfs_selinux_context= */ NULL));
+
+                        ASSERT_OK(mstack_open_images(mstack, /* mountfsd_link= */ NULL, /* userns_fd= */ -EBADF,
+                                                     /* image_policy= */ NULL, /* image_filter= */ NULL, /* flags= */ 0));
+
+                        _cleanup_(rmdir_and_freep) char *m = NULL;
+                        ASSERT_OK(mkdtemp_malloc("/tmp/mstack-temporary-XXXXXX", &m));
+                        ASSERT_OK(mstack_make_mounts(mstack, m, /* flags= */ 0, /* uid_shift= */ UID_INVALID));
+
+                        _cleanup_(rmdir_and_freep) char *w = NULL;
+                        ASSERT_OK(mkdtemp_malloc("/tmp/mstack-where-XXXXXX", &w));
+
+                        _cleanup_close_ int rfd = -EBADF;
+                        ASSERT_OK(mstack_bind_mounts(mstack, w, /* where_fd= */ -EBADF, /* flags= */ 0, &rfd));
+
+                        ASSERT_OK_ZERO(path_is_read_only_fs(w));
+                        _cleanup_free_ char *probe = ASSERT_PTR(path_join(w, "probe"));
+                        ASSERT_OK_ERRNO(mkdir(probe, 0755));
+
+                        _exit(EXIT_SUCCESS);
+                }
+        }
+}
+
+TEST(mstack_volatile_yes_usr_merge_validation) {
+        /* --volatile=yes validates that the assembled tree has adopted the merged-/usr scheme before
+         * extracting /usr/ out of it: a real /bin/ directory (rather than a symlink into /usr/, or no
+         * /bin/ at all) means /usr/ alone isn't enough to boot, and mstack_make_mounts() must refuse
+         * cleanly instead of silently producing a broken (missing /bin, /sbin, /lib, /lib64) root. */
+        if (!have_effective_cap(CAP_SYS_ADMIN))
+                return (void) log_tests_skipped("not attaching mstack, lacking privs");
+        if (!mount_new_api_supported())
+                return (void) log_tests_skipped("kernel does not support new mount API, skipping usr-merge validation test.");
+        if (running_in_chroot() > 0)
+                return (void) log_tests_skipped("running in chroot(), skipping usr-merge validation test.");
+
+        /* /bin/ is a real, non-merged directory: refused with EISDIR. */
+        {
+                _cleanup_(rm_rf_physical_and_freep) char *t = NULL;
+                _cleanup_close_ int tfd = -EBADF;
+                tfd = mkdtemp_open("/tmp/mstack-volatile-yes-nonmerged-usr-XXXXXX", O_PATH, &t);
+                ASSERT_OK(tfd);
+                ASSERT_OK_ERRNO(mkdirat(tfd, "usr", 0755));
+                ASSERT_OK_ERRNO(mkdirat(tfd, "bin", 0755));
+
+                int root_fd = open(t, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                ASSERT_OK_ERRNO(root_fd);
+
+                _cleanup_(mstack_freep) MStack *mstack = NULL;
+                ASSERT_OK(mstack_new_from_root_fd(TAKE_FD(root_fd), &mstack));
+                ASSERT_OK(mstack_merge_volatile(mstack, VOLATILE_YES, UID_INVALID, /* tmpfs_selinux_context= */ NULL));
+
+                ASSERT_OK(mstack_open_images(mstack, /* mountfsd_link= */ NULL, /* userns_fd= */ -EBADF,
+                                             /* image_policy= */ NULL, /* image_filter= */ NULL, /* flags= */ 0));
+
+                _cleanup_(rmdir_and_freep) char *m = NULL;
+                ASSERT_OK(mkdtemp_malloc("/tmp/mstack-temporary-XXXXXX", &m));
+
+                ASSERT_EQ(mstack_make_mounts(mstack, m, /* flags= */ 0, /* uid_shift= */ UID_INVALID), -EISDIR);
+        }
+
+        /* /bin/ exists as neither a directory nor a symlink (a plain file): refused with EINVAL. */
+        {
+                _cleanup_(rm_rf_physical_and_freep) char *t = NULL;
+                _cleanup_close_ int tfd = -EBADF;
+                tfd = mkdtemp_open("/tmp/mstack-volatile-yes-badbin-XXXXXX", O_PATH, &t);
+                ASSERT_OK(tfd);
+                ASSERT_OK_ERRNO(mkdirat(tfd, "usr", 0755));
+                _cleanup_close_ int bin_fd = openat(tfd, "bin", O_CREAT|O_WRONLY|O_CLOEXEC, 0644);
+                ASSERT_OK_ERRNO(bin_fd);
+                bin_fd = safe_close(bin_fd);
+
+                int root_fd = open(t, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                ASSERT_OK_ERRNO(root_fd);
+
+                _cleanup_(mstack_freep) MStack *mstack = NULL;
+                ASSERT_OK(mstack_new_from_root_fd(TAKE_FD(root_fd), &mstack));
+                ASSERT_OK(mstack_merge_volatile(mstack, VOLATILE_YES, UID_INVALID, /* tmpfs_selinux_context= */ NULL));
+
+                ASSERT_OK(mstack_open_images(mstack, /* mountfsd_link= */ NULL, /* userns_fd= */ -EBADF,
+                                             /* image_policy= */ NULL, /* image_filter= */ NULL, /* flags= */ 0));
+
+                _cleanup_(rmdir_and_freep) char *m = NULL;
+                ASSERT_OK(mkdtemp_malloc("/tmp/mstack-temporary-XXXXXX", &m));
+
+                ASSERT_EQ(mstack_make_mounts(mstack, m, /* flags= */ 0, /* uid_shift= */ UID_INVALID), -EINVAL);
+        }
 }
 
 DEFINE_TEST_MAIN(LOG_INFO);

@@ -197,8 +197,8 @@ check "bind@writable rw"             "/writable type.*rw"   "$OUT"
 check "robind@config ro"             "/config type.*ro"     "$OUT"
 check "robind@var-config ro"         "/var/config type.*ro" "$OUT"
 # marker.txt is at root, not under /usr - expected absent with --volatile=yes
-MARKER=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile cat /marker.txt || true)
-check "layer@1 marker absent with --volatile=yes" "" "$MARKER"
+MARKER=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile cat /marker.txt 2>&1 || true)
+check "layer@1 marker absent with --volatile=yes" "No such file or directory" "$MARKER"
 
 echo "=== --volatile=overlay ==="
 OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay mount | grep "/ type\|/config\|/writable" || true)
@@ -224,9 +224,16 @@ STATE_WRITE=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=state cat 
 check "writes to --volatile=state's /var are discarded" "No such file or directory" "$STATE_WRITE"
 
 echo "=== tmpfs@ entry ==="
-# tmpfs@ mount points, like bind@/robind@, are created on demand - that needs a writable root
-# to create the new top-level /extra directory in, hence --volatile=overlay here.
 mkdir -p "$MSTACK_DIR/tmpfs@extra"
+
+# tmpfs@ mount points, like bind@/robind@, are created on demand under MSTACK_DEFER_MOUNT: their
+# parent directory is pre-created while root is still writable (see the pre-create loop in
+# mstack_bind_mounts() in mstack.c), so this works even on an otherwise read-only root - no
+# --volatile= needed just to create the new top-level /extra mountpoint.
+OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" mount | grep "/ type\|/extra type" || true)
+check "root stays ro with tmpfs@ present" "/ type.*ro" "$OUT"
+check "tmpfs@extra mounts a fresh tmpfs on a read-only root" "/extra type.*rw" "$OUT"
+
 OUT=$(systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay mount | grep "/extra type" || true)
 check "tmpfs@extra mounts a fresh tmpfs" "/extra type.*rw" "$OUT"
 systemd-nspawn --pipe --mstack "$MSTACK_DIR" --volatile=overlay sh -c 'echo "should-not-persist" > /extra/tmpfs-write-test.txt'

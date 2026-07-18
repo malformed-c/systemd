@@ -4188,15 +4188,28 @@ static int outer_child(
 
         /* chown_uid wasn't known yet when the --mstack= case merged --volatile= into 'mstack' above (that
          * has to happen before the root is even attached, well before this point) - patch in the now-known
-         * uid=/gid= tmpfs parity for any tmpfs mstack_merge_volatile() may still go on to realize (its
-         * synthetic --volatile=overlay rw layer, or a --volatile=state tmpfs@/var, both created later via
-         * mstack_make_mounts()/mstack_apply_bind_mounts()). Matches upstream's existing "0 means no shift
-         * needed" convention for uid_shift. */
+         * uid=/gid= tmpfs parity for any tmpfs mstack_merge_volatile() may still go on to realize. This is
+         * enough on its own for a --volatile=state tmpfs@/var: it's only actually created later, in the
+         * deferred mstack_apply_bind_mounts() pass after mount_all(), well after this point, so it always
+         * sees the patched-in shift. Matches upstream's existing "0 means no shift needed" convention for
+         * uid_shift. */
         if (arg_mstack) {
                 mstack->tmpfs_uid_shift = chown_uid == 0 ? UID_INVALID : chown_uid;
                 r = free_and_strdup_warn(&mstack->tmpfs_selinux_context, arg_selinux_apifs_context);
                 if (r < 0)
                         return r;
+
+                /* Unlike --volatile=state's tmpfs@/var above, --volatile=overlay's synthetic writable rw
+                 * layer was already fully realized by mstack_make_mounts() further up, before chown_uid
+                 * was known here - the patched-in tmpfs_uid_shift above is too late to affect it, so it
+                 * ended up owned by whatever uid mstack_make_tmpfs() was invoked with back then (none,
+                 * i.e. host root). mstack_make_tmpfs()'s uid=/gid= mount option only ever affects the
+                 * tmpfs's own top-level root inode, though, and nothing has been created inside it yet at
+                 * this point (real population only starts further down, via base_filesystem_create() and
+                 * friends) - so a plain chown() of the merged root here achieves exactly what the correct
+                 * uid=/gid= mount option would have, without needing to re-realize anything. */
+                if (arg_volatile_mode == VOLATILE_OVERLAY && chown_uid != 0 && chown(directory, chown_uid, chown_uid) < 0)
+                        return log_error_errno(errno, "Failed to chown '%s': %m", directory);
         }
 
         /* So the whole tree is now MS_SLAVE, i.e. we'll still receive mount/umount events from the host
@@ -4221,7 +4234,11 @@ static int outer_child(
                  * layers into it exactly as the --mstack= case does above, then run it through the same
                  * assembly/bind-application pipeline (MSTACK_DEFER_MOUNT so tmpfs@/bind@ realization
                  * stays correctly ordered after remount_idmap() below, same as the --mstack= case). */
-                _cleanup_close_ int root_fd = open_tree(-1, directory, OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_SYMLINK_NOFOLLOW);
+                /* AT_RECURSIVE: 'directory' may already have submounts of its own (e.g. a separately
+                 * mounted /usr/) from whichever of the three mechanisms further up attached the root;
+                 * without it, open_tree() would silently drop them from the clone, leaving empty
+                 * mountpoint directories behind in the assembled --volatile= result. */
+                _cleanup_close_ int root_fd = open_tree(-1, directory, OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_RECURSIVE|AT_SYMLINK_NOFOLLOW);
                 if (root_fd < 0)
                         return log_error_errno(errno, "Failed to clone root directory '%s': %m", directory);
 

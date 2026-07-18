@@ -2,6 +2,7 @@
 
 #include <linux/loop.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "sd-varlink.h"
@@ -371,7 +372,7 @@ static int mstack_normalize(MStack *mstack) {
         typesafe_qsort(mstack->mounts, mstack->n_mounts, mount_compare_func);
 
         size_t n_layers = 0;
-        bool has_rw = false, has_root_bind = false, has_usr_bind = false, has_root = false;
+        bool has_rw = false, has_synthetic_rw = false, has_root_bind = false, has_usr_bind = false, has_root = false;
         FOREACH_ARRAY(m, mstack->mounts, mstack->n_mounts) {
                 switch (m->mount_type) {
                 case MSTACK_LAYER:
@@ -381,6 +382,11 @@ static int mstack_normalize(MStack *mstack) {
                 case MSTACK_RW:
                         assert(!has_rw);
                         has_rw = true;
+                        /* A synthetic rw layer (e.g. from --volatile=overlay) carries no backing fd yet -
+                         * it's only realized into a throwaway tmpfs later, in mstack_make_mounts(). Track
+                         * it separately: it can't be collapsed into a MSTACK_BIND below like a real rw/
+                         * entry could, since there's nothing to bind-mount yet. */
+                        has_synthetic_rw = m->what_fd < 0 && m->mount_fd < 0;
                         break;
 
                 case MSTACK_BIND:
@@ -411,6 +417,17 @@ static int mstack_normalize(MStack *mstack) {
                 mstack_remove(mstack, MSTACK_RW);
 
                 n_layers = 0;
+                has_rw = false;
+        }
+
+        /* A lone synthetic rw layer (e.g. a bare --volatile=overlay with nothing else in the .mstack/) has
+         * no backing fd to turn into a bind mount below - there's nothing to bind-mount yet, it's only
+         * realized into a throwaway tmpfs later, in mstack_make_mounts(). Drop it instead: with nothing
+         * else left, has_tmpfs_root below naturally becomes true, and mstack_make_mounts() already
+         * creates a fresh writable tmpfs root unconditionally in that case - the exact same end result a
+         * bind mount would have produced, once realized. */
+        if (!has_root && n_layers == 0 && has_rw && has_synthetic_rw) {
+                mstack_remove(mstack, MSTACK_RW);
                 has_rw = false;
         }
 
@@ -1294,8 +1311,26 @@ int mstack_make_mounts(
         }
 
         if (mstack->extract_usr_only) {
-                /* --volatile=yes: we now have a fully assembled tree at root_mount_fd (whatever
-                 * combination of root/, layer@, rw/ that represents); clone /usr/ out of it - the same
+                /* --volatile=yes only keeps /usr/ around; validate the tree has adopted the merged-/usr
+                 * scheme before going any further, same as the pre-mstack implementation did: /bin (and by
+                 * extension /sbin, /lib, /lib64) must either not exist yet (a naked /usr/, the rest is
+                 * created below by base_filesystem_create()) or already be a symlink into /usr/. Anything
+                 * else (in particular a real /bin/ directory) means /usr/ alone isn't enough to boot. */
+                struct stat st;
+                if (fstatat(mstack->root_mount_fd, "bin", &st, AT_SYMLINK_NOFOLLOW) < 0) {
+                        if (errno != ENOENT)
+                                return log_debug_errno(errno, "Failed to stat /bin below --volatile=yes root: %m");
+                } else if (S_ISDIR(st.st_mode))
+                        return log_error_errno(SYNTHETIC_ERRNO(EISDIR),
+                                               "Sorry, --volatile=yes mode is not supported with OS images that have not merged /bin/, /sbin/, /lib/, /lib64/ into /usr/. "
+                                               "Please work with your distribution and help them adopt the merged /usr scheme.");
+                else if (!S_ISLNK(st.st_mode))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "If --volatile=yes is used /bin must be a symlink (for merged /usr support) or non-existent "
+                                               "(in which case a symlink is created automatically).");
+
+                /* We now have a fully assembled tree at root_mount_fd (whatever combination of root/,
+                 * layer@, rw/ that represents); clone /usr/ out of it - the same
                  * open_tree()-on-a-detached-mount pattern used for overlayfs_mnt_fd above works
                  * identically here regardless of which of the three paths above produced root_mount_fd -
                  * before replacing root_mount_fd itself with a throwaway tmpfs. */
@@ -1518,7 +1553,7 @@ int mstack_bind_mounts(
                  * replaces (e.g. /run, /tmp) will be hidden, but the deferred apply
                  * recreates them on the new writable mounts. */
                 FOREACH_ARRAY(m, mstack->mounts, mstack->n_mounts) {
-                        if (!IN_SET(m->mount_type, MSTACK_BIND, MSTACK_ROBIND) ||
+                        if (!IN_SET(m->mount_type, MSTACK_BIND, MSTACK_ROBIND, MSTACK_TMPFS) ||
                             m == mstack->root_mount)
                                 continue;
 
