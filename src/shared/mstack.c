@@ -1349,19 +1349,30 @@ int mstack_make_mounts(
                                                "(in which case a symlink is created automatically).");
 
                 /* We now have a fully assembled tree at root_mount_fd (whatever combination of root/,
-                 * layer@, rw/ that represents); clone /usr/ out of it - the same
-                 * open_tree()-on-a-detached-mount pattern used for overlayfs_mnt_fd above works
-                 * identically here regardless of which of the three paths above produced root_mount_fd -
-                 * before replacing root_mount_fd itself with a throwaway tmpfs. AT_RECURSIVE is required
-                 * here even though usr/ has no submounts of its own to preserve: without it, the kernel
-                 * only allows OPEN_TREE_CLONE to target an actual mount object, not an arbitrary
-                 * subdirectory of one - root_mount_fd (from fsmount() or an earlier open_tree(CLONE)) is
-                 * always a detached mount, and usr/ within it is just a plain directory, not a mount
-                 * point of its own. */
-                mstack->usr_extract_fd = open_tree(mstack->root_mount_fd, "usr",
-                                                   OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_RECURSIVE|AT_SYMLINK_NOFOLLOW);
+                 * layer@, rw/ that represents); clone /usr/ out of it before replacing root_mount_fd
+                 * itself with a throwaway tmpfs. open_tree(OPEN_TREE_CLONE) refuses a subdirectory of a
+                 * still-detached mount (root_mount_fd, from fsmount() or an earlier open_tree(CLONE)) on
+                 * some kernels - the same underlying restriction mstack_make_overlayfs() above already
+                 * works around for exactly this reason (see the "temporarily attach" comment there):
+                 * attach root_mount_fd to temp_mount_dir first, so usr/ becomes a real, resolvable path,
+                 * then detach again immediately after - mstack_bind_mounts() re-attaches root_mount_fd to
+                 * this same directory for real once assembly is complete, so nothing is lost by
+                 * round-tripping through it here. */
+                if (move_mount(mstack->root_mount_fd, "", -EBADF, temp_mount_dir, MOVE_MOUNT_F_EMPTY_PATH) < 0)
+                        return log_debug_errno(errno, "Failed to temporarily attach root mount to '%s' for /usr/ extraction: %m", temp_mount_dir);
+
+                _cleanup_free_ char *temp_usr_dir = path_join(temp_mount_dir, "usr");
+                if (!temp_usr_dir) {
+                        (void) umount2(temp_mount_dir, MNT_DETACH);
+                        return log_oom();
+                }
+
+                mstack->usr_extract_fd = open_tree(AT_FDCWD, temp_usr_dir, OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_SYMLINK_NOFOLLOW);
+                int extract_errno = errno;
+                (void) umount2(temp_mount_dir, MNT_DETACH);
+
                 if (mstack->usr_extract_fd < 0)
-                        return log_debug_errno(errno, "Failed to clone /usr/ for --volatile=yes: %m");
+                        return log_debug_errno(extract_errno, "Failed to clone /usr/ for --volatile=yes: %m");
 
                 if (mount_setattr(mstack->usr_extract_fd, "", AT_EMPTY_PATH,
                                   &(struct mount_attr) {

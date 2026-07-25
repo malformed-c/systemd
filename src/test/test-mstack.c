@@ -195,7 +195,11 @@ TEST(mstack_merge_volatile) {
                 tfd = mkdtemp_open("/tmp/mstack-volatile-overlay-XXXXXX", O_PATH, &t);
                 ASSERT_OK(tfd);
 
-                int root_fd = open(t, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                /* mstack_new_from_root_fd() documents requiring a detached mount fd (e.g. from
+                 * open_tree(..., OPEN_TREE_CLONE)), matching what real callers (nspawn.c's --directory=/ +
+                 * --volatile= wrapping) always pass - a plain O_PATH fd on the directory itself doesn't
+                 * qualify as a mount object for move_mount()-based operations further down. */
+                int root_fd = open_tree(tfd, "", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_EMPTY_PATH);
                 ASSERT_OK_ERRNO(root_fd);
 
                 _cleanup_(mstack_freep) MStack *mstack = NULL;
@@ -223,7 +227,11 @@ TEST(mstack_merge_volatile) {
                 tfd = mkdtemp_open("/tmp/mstack-volatile-state-XXXXXX", O_PATH, &t);
                 ASSERT_OK(tfd);
 
-                int root_fd = open(t, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                /* mstack_new_from_root_fd() documents requiring a detached mount fd (e.g. from
+                 * open_tree(..., OPEN_TREE_CLONE)), matching what real callers (nspawn.c's --directory=/ +
+                 * --volatile= wrapping) always pass - a plain O_PATH fd on the directory itself doesn't
+                 * qualify as a mount object for move_mount()-based operations further down. */
+                int root_fd = open_tree(tfd, "", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_EMPTY_PATH);
                 ASSERT_OK_ERRNO(root_fd);
 
                 _cleanup_(mstack_freep) MStack *mstack = NULL;
@@ -296,7 +304,11 @@ TEST(mstack_merge_volatile) {
                 ASSERT_OK(tfd);
                 ASSERT_OK_ERRNO(mkdirat(tfd, "usr", 0755));
 
-                int root_fd = open(t, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                /* mstack_new_from_root_fd() documents requiring a detached mount fd (e.g. from
+                 * open_tree(..., OPEN_TREE_CLONE)), matching what real callers (nspawn.c's --directory=/ +
+                 * --volatile= wrapping) always pass - a plain O_PATH fd on the directory itself doesn't
+                 * qualify as a mount object for move_mount()-based operations further down. */
+                int root_fd = open_tree(tfd, "", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_EMPTY_PATH);
                 ASSERT_OK_ERRNO(root_fd);
 
                 _cleanup_(mstack_freep) MStack *mstack = NULL;
@@ -618,7 +630,11 @@ TEST(mstack_volatile_yes_usr_merge_validation) {
                 ASSERT_OK_ERRNO(mkdirat(tfd, "usr", 0755));
                 ASSERT_OK_ERRNO(mkdirat(tfd, "bin", 0755));
 
-                int root_fd = open(t, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                /* mstack_new_from_root_fd() documents requiring a detached mount fd (e.g. from
+                 * open_tree(..., OPEN_TREE_CLONE)), matching what real callers (nspawn.c's --directory=/ +
+                 * --volatile= wrapping) always pass - a plain O_PATH fd on the directory itself doesn't
+                 * qualify as a mount object for move_mount()-based operations further down. */
+                int root_fd = open_tree(tfd, "", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_EMPTY_PATH);
                 ASSERT_OK_ERRNO(root_fd);
 
                 _cleanup_(mstack_freep) MStack *mstack = NULL;
@@ -645,7 +661,11 @@ TEST(mstack_volatile_yes_usr_merge_validation) {
                 ASSERT_OK_ERRNO(bin_fd);
                 bin_fd = safe_close(bin_fd);
 
-                int root_fd = open(t, O_PATH|O_DIRECTORY|O_CLOEXEC);
+                /* mstack_new_from_root_fd() documents requiring a detached mount fd (e.g. from
+                 * open_tree(..., OPEN_TREE_CLONE)), matching what real callers (nspawn.c's --directory=/ +
+                 * --volatile= wrapping) always pass - a plain O_PATH fd on the directory itself doesn't
+                 * qualify as a mount object for move_mount()-based operations further down. */
+                int root_fd = open_tree(tfd, "", OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_EMPTY_PATH);
                 ASSERT_OK_ERRNO(root_fd);
 
                 _cleanup_(mstack_freep) MStack *mstack = NULL;
