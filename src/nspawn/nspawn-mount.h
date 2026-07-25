@@ -65,6 +65,5 @@ bool has_custom_root_mount(const CustomMount *mounts, size_t n);
 int pivot_root_parse(char **pivot_root_new, char **pivot_root_old, const char *s);
 int setup_pivot_root(const char *directory, const char *pivot_root_new, const char *pivot_root_old);
 
-
 int pin_fully_visible_api_fs(void);
 int wipe_fully_visible_api_fs(int mntns_fd);

@@ -11,7 +11,6 @@
 #include "escape.h"
 #include "extract-word.h"
 #include "fd-util.h"
-#include "format-util.h"
 #include "fs-util.h"
 #include "log.h"
 #include "mkdir.h"

@@ -2,6 +2,7 @@
 
 #include <linux/loop.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "sd-varlink.h"
@@ -31,6 +32,7 @@
 #include "uid-classification.h"
 #include "user-util.h"
 #include "unit-name.h"
+#include "user-util.h"
 #include "vpick.h"
 
 static void mstack_mount_done(MStackMount *m) {
@@ -371,7 +373,7 @@ static int mstack_normalize(MStack *mstack) {
         typesafe_qsort(mstack->mounts, mstack->n_mounts, mount_compare_func);
 
         size_t n_layers = 0;
-        bool has_rw = false, has_root_bind = false, has_usr_bind = false, has_root = false;
+        bool has_rw = false, has_synthetic_rw = false, has_root_bind = false, has_usr_bind = false, has_root = false;
         FOREACH_ARRAY(m, mstack->mounts, mstack->n_mounts) {
                 switch (m->mount_type) {
                 case MSTACK_LAYER:
@@ -381,6 +383,11 @@ static int mstack_normalize(MStack *mstack) {
                 case MSTACK_RW:
                         assert(!has_rw);
                         has_rw = true;
+                        /* A synthetic rw layer (e.g. from --volatile=overlay) carries no backing fd yet -
+                         * it's only realized into a throwaway tmpfs later, in mstack_make_mounts(). Track
+                         * it separately: it can't be collapsed into a MSTACK_BIND below like a real rw/
+                         * entry could, since there's nothing to bind-mount yet. */
+                        has_synthetic_rw = m->what_fd < 0 && m->mount_fd < 0;
                         break;
 
                 case MSTACK_BIND:
@@ -411,6 +418,17 @@ static int mstack_normalize(MStack *mstack) {
                 mstack_remove(mstack, MSTACK_RW);
 
                 n_layers = 0;
+                has_rw = false;
+        }
+
+        /* A lone synthetic rw layer (e.g. a bare --volatile=overlay with nothing else in the .mstack/) has
+         * no backing fd to turn into a bind mount below - there's nothing to bind-mount yet, it's only
+         * realized into a throwaway tmpfs later, in mstack_make_mounts(). Drop it instead: with nothing
+         * else left, has_tmpfs_root below naturally becomes true, and mstack_make_mounts() already
+         * creates a fresh writable tmpfs root unconditionally in that case - the exact same end result a
+         * bind mount would have produced, once realized. */
+        if (!has_root && n_layers == 0 && has_rw && has_synthetic_rw) {
+                mstack_remove(mstack, MSTACK_RW);
                 has_rw = false;
         }
 
@@ -518,6 +536,7 @@ static int mount_get_fd(MStackMount *m) {
 }
 
 int mstack_new_from_root_fd(int root_fd, MStack **ret) {
+        _cleanup_close_ int root_fd_close = root_fd;
         int r;
 
         assert(root_fd >= 0);
@@ -536,7 +555,7 @@ int mstack_new_from_root_fd(int root_fd, MStack **ret) {
         mstack->mounts[0] = (MStackMount) {
                 .mount_type = MSTACK_ROOT,
                 .what_fd = -EBADF,
-                .mount_fd = root_fd,
+                .mount_fd = TAKE_FD(root_fd_close),
                 .image_type = IMAGE_DIRECTORY,
         };
         mstack->n_mounts = 1;
@@ -895,10 +914,20 @@ static int mstack_make_tmpfs(MStack *mstack, const char *limits, int *ret_mnt_fd
 
         /* Creates a fresh tmpfs mount fd. On top of the base 'mode=0755' and the passed size/inode
          * limits we also apply uid=/gid= and the SELinux 'context=' (when plumbed in), for parity with
-         * nspawn's volatile tmpfs handling. */
+         * nspawn's volatile tmpfs handling. Context is appended separately, unquoted: tmpfs_patch_options()
+         * quotes it (context="...") for the legacy mount(2) comma-string parser its other two callers still
+         * use, but make_fsmount() below tokenizes options with EXTRACT_KEEP_QUOTE (quotes kept, not
+         * stripped) before handing each value straight to fsconfig() - a quoted context there reaches the
+         * kernel's SELinux fs_context parser with literal quote characters still attached, which isn't a
+         * valid security context and fails. The new mount API takes each option as its own key/value pair,
+         * so no comma-escaping (and thus no quoting) is needed here to begin with. */
         const char *base = strjoina("mode=0755", strempty(limits));
-        r = tmpfs_patch_options(base, mstack->tmpfs_uid_shift, mstack->tmpfs_selinux_context, &options);
+        r = tmpfs_patch_options(base, mstack->tmpfs_uid_shift, /* selinux_apifs_context= */ NULL, &options);
         if (r < 0)
+                return log_oom_debug();
+
+        if (mstack->tmpfs_selinux_context &&
+            strextendf_with_separator(&options, ",", "context=%s", mstack->tmpfs_selinux_context) < 0)
                 return log_oom_debug();
 
         int mnt_fd = make_fsmount(
@@ -1057,8 +1086,26 @@ static int mstack_make_overlayfs(
                         /* Idmap the layer here, while it's still a fresh, unattached clone with nothing yet
                          * created through it: this is the only point at which the kernel allows
                          * MOUNT_ATTR_IDMAP for what will become part of an overlay (see the
-                         * uidmap_userns_fd comment above). */
-                        if (uidmap_userns_fd >= 0 &&
+                         * uidmap_userns_fd comment above).
+                         *
+                         * Not for the writable rw layer, though (rw_writable: becomes upperdir/workdir
+                         * below): overlayfs creates its own private 'work/work' bookkeeping subdirectory
+                         * inside the workdir as part of materializing the superblock, and every later
+                         * write into the upperdir (including everything nspawn itself still needs to
+                         * create in the fresh root before the container payload ever runs, e.g.
+                         * base_filesystem_create(), custom --bind= mountpoints, /var/log/journal) also
+                         * goes through this same fd - all of these run as the real, unmapped caller (host
+                         * root at this point; later, whatever identity the payload runs as, which for
+                         * --mstack-uid-shift= specifically is never guaranteed to be a matching kernel
+                         * userns member either), and idmapped mounts refuse inode creation from a caller
+                         * outside the mapped range (EOVERFLOW) - except the kernel doesn't fail the
+                         * *mount* for the work/work case specifically, it just silently falls back to a
+                         * read-only mount instead, which is worse: nspawn never notices, root just ends
+                         * up unusable for the whole container lifetime. Idmapping only ever mattered here
+                         * for read access to shared, security-sensitive base image content in the
+                         * read-only lower layers, which this doesn't affect - the writable layer was never
+                         * meant to be, and never correctly was, idmapped. */
+                        if (uidmap_userns_fd >= 0 && !rw_writable &&
                             mount_setattr(cloned_fd, "", AT_EMPTY_PATH,
                                           &(struct mount_attr) {
                                                   .attr_set = MOUNT_ATTR_IDMAP,
@@ -1294,20 +1341,74 @@ int mstack_make_mounts(
         }
 
         if (mstack->extract_usr_only) {
-                /* --volatile=yes: we now have a fully assembled tree at root_mount_fd (whatever
-                 * combination of root/, layer@, rw/ that represents); clone /usr/ out of it - the same
-                 * open_tree()-on-a-detached-mount pattern used for overlayfs_mnt_fd above works
-                 * identically here regardless of which of the three paths above produced root_mount_fd -
-                 * before replacing root_mount_fd itself with a throwaway tmpfs. */
-                mstack->usr_extract_fd = open_tree(mstack->root_mount_fd, "usr",
-                                                   OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_SYMLINK_NOFOLLOW);
+                /* --volatile=yes only keeps /usr/ around; validate the tree has adopted the merged-/usr
+                 * scheme before going any further, same as the pre-mstack implementation did: /bin (and by
+                 * extension /sbin, /lib, /lib64) must either not exist yet (a naked /usr/, the rest is
+                 * created below by base_filesystem_create()) or already be a symlink into /usr/. Anything
+                 * else (in particular a real /bin/ directory) means /usr/ alone isn't enough to boot. */
+                struct stat st;
+                if (fstatat(mstack->root_mount_fd, "bin", &st, AT_SYMLINK_NOFOLLOW) < 0) {
+                        if (errno != ENOENT)
+                                return log_debug_errno(errno, "Failed to stat /bin below --volatile=yes root: %m");
+                } else if (S_ISDIR(st.st_mode))
+                        return log_error_errno(SYNTHETIC_ERRNO(EISDIR),
+                                               "Sorry, --volatile=yes mode is not supported with OS images that have not merged /bin/, /sbin/, /lib/, /lib64/ into /usr/. "
+                                               "Please work with your distribution and help them adopt the merged /usr scheme.");
+                else if (!S_ISLNK(st.st_mode))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "If --volatile=yes is used /bin must be a symlink (for merged /usr support) or non-existent "
+                                               "(in which case a symlink is created automatically).");
+
+                /* We now have a fully assembled tree at root_mount_fd (whatever combination of root/,
+                 * layer@, rw/ that represents); clone /usr/ out of it before replacing root_mount_fd
+                 * itself with a throwaway tmpfs. open_tree(OPEN_TREE_CLONE) refuses a subdirectory of a
+                 * still-detached mount (root_mount_fd, from fsmount() or an earlier open_tree(CLONE)) on
+                 * some kernels - the same underlying restriction mstack_make_overlayfs() above already
+                 * works around for exactly this reason (see the "temporarily attach" comment there):
+                 * attach root_mount_fd to temp_mount_dir first, so usr/ becomes a real, resolvable path,
+                 * then detach again immediately after - mstack_bind_mounts() re-attaches root_mount_fd to
+                 * this same directory for real once assembly is complete, so nothing is lost by
+                 * round-tripping through it here. */
+                if (move_mount(mstack->root_mount_fd, "", -EBADF, temp_mount_dir, MOVE_MOUNT_F_EMPTY_PATH) < 0)
+                        return log_debug_errno(errno, "Failed to temporarily attach root mount to '%s' for /usr/ extraction: %m", temp_mount_dir);
+
+                _cleanup_free_ char *temp_usr_dir = path_join(temp_mount_dir, "usr");
+                if (!temp_usr_dir) {
+                        (void) umount2(temp_mount_dir, MNT_DETACH);
+                        return log_oom();
+                }
+
+                mstack->usr_extract_fd = open_tree(AT_FDCWD, temp_usr_dir, OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC|AT_SYMLINK_NOFOLLOW);
+                int extract_errno = errno;
+                (void) umount2(temp_mount_dir, MNT_DETACH);
+
                 if (mstack->usr_extract_fd < 0)
-                        return log_debug_errno(errno, "Failed to clone /usr/ for --volatile=yes: %m");
+                        return log_debug_errno(extract_errno, "Failed to clone /usr/ for --volatile=yes: %m");
+
+                /* Idmap usr_extract_fd here, while it's still a fresh, unattached clone with nothing yet
+                 * created through it - same reasoning as the per-layer idmap in mstack_make_overlayfs()
+                 * above: this is the only point at which the kernel allows MOUNT_ATTR_IDMAP on it. This
+                 * matters for --directory=/--image= + --volatile=yes with a non-managed userns
+                 * (nspawn.c's synthetic MStack wrapping passes tmpfs_uid_shift = chown_uid there, unlike
+                 * the plain --mstack= case which always passes UID_INVALID): nspawn's own separate
+                 * remount_idmap() step further up its call chain used to idmap this same path afterward,
+                 * but by then it's already the merged overlay assembled here, and the kernel refuses to
+                 * idmap an already-merged overlay - so it must happen here instead, before merging is
+                 * even a concept that applies (usr_extract_fd is just a detached clone, not yet attached
+                 * anywhere). nspawn.c is expected to skip its own remount_idmap() pass for this path once
+                 * this has already applied it. */
+                _cleanup_close_ int usr_idmap_userns_fd = -EBADF;
+                if (uid_is_valid(mstack->tmpfs_uid_shift)) {
+                        usr_idmap_userns_fd = make_userns(mstack->tmpfs_uid_shift, MSTACK_UID_SHIFT_RANGE, UID_INVALID, UID_INVALID, REMOUNT_IDMAPPING_NONE);
+                        if (usr_idmap_userns_fd < 0)
+                                return log_debug_errno(usr_idmap_userns_fd, "Failed to create idmap userns for /usr/: %m");
+                }
 
                 if (mount_setattr(mstack->usr_extract_fd, "", AT_EMPTY_PATH,
                                   &(struct mount_attr) {
-                                          .attr_set = MOUNT_ATTR_RDONLY,
+                                          .attr_set = MOUNT_ATTR_RDONLY | (usr_idmap_userns_fd >= 0 ? MOUNT_ATTR_IDMAP : 0),
                                           .propagation = MS_PRIVATE, /* disconnect us from bind mount source */
+                                          .userns_fd = usr_idmap_userns_fd,
                                   }, sizeof(struct mount_attr)) < 0)
                         return log_debug_errno(errno, "Failed to mark /usr/ read-only for --volatile=yes: %m");
 
@@ -1332,7 +1433,7 @@ int mstack_make_mounts(
 }
 
 /* Extracted to make it reusable for mstack deferred binds. */
-static int mstack_apply_attr(int dfd, MStackMountType mount_type, bool writable, MStackFlags flags) {
+static int mstack_apply_attr(int dfd, MStackMountType mount_type, bool writable, MStackFlags flags, bool root_recursive_ok) {
         /* ROBIND is always read-only.
          * ROOT is read-only if writable is false (due to MSTACK_RDONLY or no write layers).
          * BIND is read-only if and only if MSTACK_BINDS_RDONLY (--read-only flag)
@@ -1341,16 +1442,39 @@ static int mstack_apply_attr(int dfd, MStackMountType mount_type, bool writable,
                       (mount_type == MSTACK_ROOT && !writable) ||
                       (mount_type == MSTACK_BIND && FLAGS_SET(flags, MSTACK_BINDS_RDONLY));
 
-        /* Do not use AT_RECURSIVE on the ROOT mount to avoid recursively overwriting
-         * attributes of bind mounts (like bind@) attached inside it earlier. */
-        int attr_flags = AT_EMPTY_PATH | (mount_type == MSTACK_ROOT ? 0 : AT_RECURSIVE);
+        /* Non-ROOT mount types (bind@/robind@/tmpfs@) always recurse: they're freshly attached,
+         * single-purpose mounts with nothing else layered inside them yet.
+         *
+         * For ROOT, the caller decides via root_recursive_ok: recursing is only safe once nothing else
+         * is already attached under root that a recursive attribute change would incorrectly clobber -
+         * bind@/robind@ mounts (attached earlier when not MSTACK_DEFER_MOUNT, see
+         * mstack_apply_bind_mounts() above) or the /usr/ extracted by --volatile=yes (attached earlier
+         * unconditionally, see mstack_bind_mounts() above, regardless of MSTACK_DEFER_MOUNT). When it
+         * genuinely is safe (MSTACK_DEFER_MOUNT, no --volatile=yes extraction), recursing here is in fact
+         * needed: it's the only way nested submounts that were part of the original --directory=/--image=
+         * tree itself (preserved by nspawn.c's own AT_RECURSIVE clone) inherit root's read-only/writable
+         * state, matching what the pre-mstack setup_volatile_state() did via its own
+         * bind_remount_recursive() call. */
+        bool recursive = mount_type != MSTACK_ROOT || root_recursive_ok;
+        int attr_flags = AT_EMPTY_PATH | (recursive ? AT_RECURSIVE : 0);
 
-        if (mount_setattr(dfd, "", attr_flags,
-                          &(struct mount_attr) {
-                                  .attr_set = rdonly ? MOUNT_ATTR_RDONLY : 0,
-                                  .attr_clr = rdonly ? 0 : MOUNT_ATTR_RDONLY,
-                          }, sizeof(struct mount_attr)) < 0)
-                return log_debug_errno(errno, "Failed to set mount attributes: %m");
+        struct mount_attr ma = {
+                .attr_set = rdonly ? MOUNT_ATTR_RDONLY : 0,
+                .attr_clr = rdonly ? 0 : MOUNT_ATTR_RDONLY,
+        };
+
+        if (mount_setattr(dfd, "", attr_flags, &ma, sizeof(ma)) < 0) {
+                if (errno != EINVAL || !recursive)
+                        return log_debug_errno(errno, "Failed to set mount attributes: %m");
+
+                /* A recursive attribute change can fail with EINVAL if the subtree contains a locked
+                 * mount somewhere (same class of restriction the AT_RECURSIVE clone in nspawn.c already
+                 * has an identical fallback for) - fall back to non-recursive rather than hard-failing
+                 * the whole mount over nested submounts we can't affect anyway. */
+                log_debug_errno(errno, "Failed to recursively set mount attributes, falling back to non-recursive: %m");
+                if (mount_setattr(dfd, "", AT_EMPTY_PATH, &ma, sizeof(ma)) < 0)
+                        return log_debug_errno(errno, "Failed to set mount attributes: %m");
+        }
 
         return 0;
 }
@@ -1436,7 +1560,7 @@ int mstack_apply_bind_mounts(
                  * For the deferred path (called from apply_deferred_mstack_bind_mounts()),
                  * this is the only place attributes are set on these mounts since the
                  * recursive root_fd call already happened before they were attached. */
-                r = mstack_apply_attr(mount_fd, m->mount_type, writable, flags);
+                r = mstack_apply_attr(mount_fd, m->mount_type, writable, flags, /* root_recursive_ok= (unused for non-ROOT) */ false);
                 if (r < 0)
                         return r;
 
@@ -1518,7 +1642,7 @@ int mstack_bind_mounts(
                  * replaces (e.g. /run, /tmp) will be hidden, but the deferred apply
                  * recreates them on the new writable mounts. */
                 FOREACH_ARRAY(m, mstack->mounts, mstack->n_mounts) {
-                        if (!IN_SET(m->mount_type, MSTACK_BIND, MSTACK_ROBIND) ||
+                        if (!IN_SET(m->mount_type, MSTACK_BIND, MSTACK_ROBIND, MSTACK_TMPFS) ||
                             m == mstack->root_mount)
                                 continue;
 
@@ -1540,9 +1664,19 @@ int mstack_bind_mounts(
          * protection here - 'writable' alone (does an rw/ or synthetic --volatile=overlay layer exist?)
          * is correct. A throwaway tmpfs root (has_tmpfs_root, no real root/ entry backing it - e.g. from
          * --volatile=yes) has nothing to protect and is never tied to an rw/ layer's writability at all,
-         * so it stays writable unless the caller explicitly asked for read-only. */
+         * so it stays writable unless the caller explicitly asked for read-only. A plain root/-only stack
+         * (no layer@, no rw/, root_mount still set) deliberately defaults to read-only here too, same as
+         * ever - it has no writable layer of its own either, and read-only-by-default is the safe choice
+         * absent an explicit --volatile= or rw/ opt-in (see TEST-13-NSPAWN.mstack.sh's "tmpfs@ present on
+         * a read-only rootfs" coverage, which relies on exactly this). */
         bool root_writable = mstack->root_mount ? writable : !FLAGS_SET(flags, MSTACK_RDONLY);
-        r = mstack_apply_attr(root_fd, MSTACK_ROOT, root_writable, flags);
+
+        /* Recursing on root is only safe once nothing else is already attached under it: bind@/robind@
+         * mounts (attached above when not MSTACK_DEFER_MOUNT) and the /usr/ extracted by --volatile=yes
+         * (attached above unconditionally, regardless of MSTACK_DEFER_MOUNT) would otherwise have their
+         * own, independently-decided attributes incorrectly overwritten. */
+        bool root_recursive_ok = FLAGS_SET(flags, MSTACK_DEFER_MOUNT) && mstack->usr_extract_fd < 0;
+        r = mstack_apply_attr(root_fd, MSTACK_ROOT, root_writable, flags, root_recursive_ok);
         if (r < 0)
                 return r;
 

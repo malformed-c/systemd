@@ -65,9 +65,12 @@
       <listitem><para>Similar, <filename>robind@<replaceable>location</replaceable>.raw</filename> creates a
       read-only bind mount from a DDI.</para></listitem>
 
-      <listitem><para>If a <filename>root/</filename> subdirectory exists, it is used as root of the
-      resulting mount hierarchy, and only the <filename>usr/</filename> subtree of the overlayfs mount will
-      be bound to <filename>usr/</filename> in the hierarchy.</para></listitem>
+      <listitem><para>If a <filename>root/</filename> subdirectory exists, it is used as the base (bottommost)
+      layer of the resulting mount hierarchy: if any <filename>layer@<replaceable>id</replaceable></filename>
+      or <filename>rw</filename> entries are also present, <filename>root/</filename> becomes the lowest
+      layer of the same <literal>overlayfs</literal> stack (its content merges with theirs across the whole
+      tree, not just <filename>usr/</filename>); otherwise it is used as the root directly on its
+      own.</para></listitem>
 
       <listitem><para>A <filename>tmpfs@<replaceable>location</replaceable>/</filename> directory (which
       should be left empty) mounts a fresh, writable <literal>tmpfs</literal> at the mount point
