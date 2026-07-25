@@ -1386,16 +1386,14 @@ int mstack_make_mounts(
                 if (r < 0)
                         return log_debug_errno(r, "Failed to create throwaway root tmpfs for --volatile=yes: %m");
 
-                /* If there was an explicit root/ entry (or an overlay), it's now fully consumed: its
-                 * content only lives on in usr_extract_fd, and root_mount_fd is a throwaway tmpfs that has
-                 * nothing to do with it any more. Clear both stale pointers so mstack_bind_mounts()'s
-                 * root_writable check correctly takes the "throwaway tmpfs, stay writable" branch instead
-                 * of the "protect the real root/ entry or overlay" one - otherwise the fresh tmpfs would
-                 * incorrectly end up read-only (mstack_has_writable_layers() is false for --volatile=yes,
-                 * there's no rw/ layer), breaking base_filesystem_create() and friends immediately
-                 * afterwards. */
+                /* If there was an explicit root/ entry, it's now fully consumed: its content only lives
+                 * on in usr_extract_fd, and root_mount_fd is a throwaway tmpfs that has nothing to do
+                 * with it any more. Clear the stale pointer so mstack_bind_mounts()'s root_writable check
+                 * correctly takes the "throwaway tmpfs, stay writable" branch instead of the "protect the
+                 * real root/ entry" one - otherwise the fresh tmpfs would incorrectly end up read-only
+                 * (mstack_has_writable_layers() is false for --volatile=yes, there's no rw/ layer),
+                 * breaking base_filesystem_create() and friends immediately afterwards. */
                 mstack->root_mount = NULL;
-                mstack->has_overlayfs = false;
 
                 log_debug("Extracted /usr/ for --volatile=yes, replaced root with a throwaway tmpfs.");
         }
@@ -1610,13 +1608,14 @@ int mstack_bind_mounts(
         /* root/ now always folds into the overlay as its base layer whenever one exists (see
          * mstack_make_overlayfs()/mount_is_ro()), so a plain root/ entry no longer needs special
          * protection here - 'writable' alone (does an rw/ or synthetic --volatile=overlay layer exist?)
-         * is correct, but only once an overlay actually exists (has_overlayfs): a bare root/-only stack
-         * (no layer@, no rw/) is never merged into an overlay at all - it's just a plain bind mount of
-         * root/ itself (see the assembly above) - and, like a throwaway tmpfs root (has_tmpfs_root, no
-         * real root/ entry backing it - e.g. from --volatile=yes, which also resets has_overlayfs once
-         * extraction consumes it), has nothing to protect and is never tied to an rw/ layer's writability
-         * at all, so it stays writable unless the caller explicitly asked for read-only. */
-        bool root_writable = mstack->has_overlayfs ? writable : !FLAGS_SET(flags, MSTACK_RDONLY);
+         * is correct. A throwaway tmpfs root (has_tmpfs_root, no real root/ entry backing it - e.g. from
+         * --volatile=yes) has nothing to protect and is never tied to an rw/ layer's writability at all,
+         * so it stays writable unless the caller explicitly asked for read-only. A plain root/-only stack
+         * (no layer@, no rw/, root_mount still set) deliberately defaults to read-only here too, same as
+         * ever - it has no writable layer of its own either, and read-only-by-default is the safe choice
+         * absent an explicit --volatile= or rw/ opt-in (see TEST-13-NSPAWN.mstack.sh's "tmpfs@ present on
+         * a read-only rootfs" coverage, which relies on exactly this). */
+        bool root_writable = mstack->root_mount ? writable : !FLAGS_SET(flags, MSTACK_RDONLY);
         r = mstack_apply_attr(root_fd, MSTACK_ROOT, root_writable, flags);
         if (r < 0)
                 return r;
