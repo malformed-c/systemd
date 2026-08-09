@@ -1109,8 +1109,26 @@ static int mstack_make_overlayfs(
                         /* Idmap the layer here, while it's still a fresh, unattached clone with nothing yet
                          * created through it: this is the only point at which the kernel allows
                          * MOUNT_ATTR_IDMAP for what will become part of an overlay (see the
-                         * uidmap_userns_fd comment above). */
-                        if (uidmap_userns_fd >= 0 &&
+                         * uidmap_userns_fd comment above).
+                         *
+                         * Not for the writable rw layer, though (rw_writable: becomes upperdir/workdir
+                         * below): overlayfs creates its own private 'work/work' bookkeeping subdirectory
+                         * inside the workdir as part of materializing the superblock, and every later
+                         * write into the upperdir (including everything nspawn itself still needs to
+                         * create in the fresh root before the container payload ever runs, e.g.
+                         * base_filesystem_create(), custom --bind= mountpoints, /var/log/journal) also
+                         * goes through this same fd - all of these run as the real, unmapped caller (host
+                         * root at this point; later, whatever identity the payload runs as, which for
+                         * --mstack-uid-shift= specifically is never guaranteed to be a matching kernel
+                         * userns member either), and idmapped mounts refuse inode creation from a caller
+                         * outside the mapped range (EOVERFLOW) - except the kernel doesn't fail the
+                         * *mount* for the work/work case specifically, it just silently falls back to a
+                         * read-only mount instead, which is worse: nspawn never notices, root just ends
+                         * up unusable for the whole container lifetime. Idmapping only ever mattered here
+                         * for read access to shared, security-sensitive base image content in the
+                         * read-only lower layers, which this doesn't affect - the writable layer was never
+                         * meant to be, and never correctly was, idmapped. */
+                        if (uidmap_userns_fd >= 0 && !rw_writable &&
                             mount_setattr(cloned_fd, "", AT_EMPTY_PATH,
                                           &(struct mount_attr) {
                                                   .attr_set = MOUNT_ATTR_IDMAP,
