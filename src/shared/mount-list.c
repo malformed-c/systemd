@@ -84,7 +84,7 @@ static const char * const mount_mode_table[_MOUNT_MODE_MAX] = {
         [MOUNT_READ_WRITE_IMPLICIT]   = "read-write-implicit",
 };
 
-DEFINE_STRING_TABLE_LOOKUP_TO_STRING(mount_mode, MountMode);
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(mount_mode, MountMode);
 
 const char* mount_entry_path(const MountEntry *p) {
         assert(p);
@@ -506,7 +506,7 @@ int bind_mount_device_dir(const char *temporary_mount, const char *dir) {
         return mount_nofollow_verbose(LOG_DEBUG, dir, t, NULL, MS_BIND, NULL);
 }
 
-char* settle_runtime_dir(RuntimeScope scope) {
+static char* settle_runtime_dir(RuntimeScope scope) {
         char *runtime_dir;
 
         if (scope != RUNTIME_SCOPE_USER)
@@ -538,7 +538,7 @@ int create_temporary_mount_point(RuntimeScope scope, char **ret) {
         return 0;
 }
 
-int mount_bind_sysfs(const MountEntry *m) {
+static int mount_bind_sysfs(const MountEntry *m) {
         int r;
 
         assert(m);
@@ -654,7 +654,7 @@ int mount_private_apivfs(
         return 1;
 }
 
-int mount_bind(
+static int mount_bind(
                 const MountEntry *m,
                 const char *what,
                 bool recursive,
@@ -702,7 +702,7 @@ int mount_bind(
         return 0;
 }
 
-int mount_tmpfs(const MountEntry *m) {
+static int mount_tmpfs(const MountEntry *m) {
         const char *entry_path, *inner_path;
         int r;
 
@@ -728,7 +728,7 @@ int mount_tmpfs(const MountEntry *m) {
         return 1;
 }
 
-int mount_run(const MountEntry *m) {
+static int mount_run(const MountEntry *m) {
         int r;
 
         assert(m);
@@ -742,7 +742,7 @@ int mount_run(const MountEntry *m) {
         return mount_tmpfs(m);
 }
 
-int mount_mqueuefs(const MountEntry *m) {
+static int mount_mqueuefs(const MountEntry *m) {
         int r;
         const char *entry_path;
 
@@ -827,7 +827,7 @@ int mount_image(
         return 1;
 }
 
-int mount_overlay(const MountEntry *m) {
+static int mount_overlay(const MountEntry *m) {
         _cleanup_free_ char *options = NULL, *layers = NULL;
         int r;
 
@@ -923,7 +923,7 @@ int mount_bpffs(const MountEntry *m, PidRef *pidref, int socket_fd, int errno_pi
         return 1;
 }
 
-int follow_symlink(
+static int follow_symlink(
                 const char *root_directory,
                 MountEntry *m) {
 
@@ -963,7 +963,7 @@ static bool should_propagate_to_submounts(const MountEntry *m) {
         return !IN_SET(m->mode, MOUNT_EMPTY_DIR, MOUNT_TMPFS, MOUNT_PRIVATE_TMPFS);
 }
 
-int make_read_only(const MountEntry *m, char **deny_list, FILE *proc_self_mountinfo) {
+static int make_read_only(const MountEntry *m, char **deny_list, FILE *proc_self_mountinfo) {
         unsigned long new_flags = 0, flags_mask = 0;
         bool submounts;
         int r;
@@ -1009,7 +1009,7 @@ int make_read_only(const MountEntry *m, char **deny_list, FILE *proc_self_mounti
         return 0;
 }
 
-int make_noexec(const MountEntry *m, char **deny_list, FILE *proc_self_mountinfo) {
+static int make_noexec(const MountEntry *m, char **deny_list, FILE *proc_self_mountinfo) {
         unsigned long new_flags = 0, flags_mask = 0;
         bool submounts;
         int r;
@@ -1045,7 +1045,7 @@ int make_noexec(const MountEntry *m, char **deny_list, FILE *proc_self_mountinfo
         return 0;
 }
 
-int make_nosuid(const MountEntry *m, FILE *proc_self_mountinfo) {
+static int make_nosuid(const MountEntry *m, FILE *proc_self_mountinfo) {
         bool submounts;
         int r;
 
