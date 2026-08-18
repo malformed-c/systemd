@@ -2153,7 +2153,11 @@ After=sys-subsystem-net-devices-ens1.device</programlisting>
     <title>Exit status</title>
 
     <para>The exit code of the program executed in the container is
-    returned.</para>
+    returned. If that program was killed by a signal, 128 + the signal
+    number is returned instead, following the convention used by
+    shells. As an exception, a program killed by
+    <constant>SIGTRAP</constant> reports 1 rather than 133, since 133
+    is reserved for the container reboot protocol.</para>
   </refsect1>
 
   <refsect1>
