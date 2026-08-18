@@ -939,303 +939,6 @@ static int mount_procfs(const MountEntry *m, const NamespaceParameters *p) {
         return mount_private_apivfs("proc", mount_entry_path(m), "/proc", opts, p->runtime_scope);
 }
 
-static int apply_one_mount(
-                const char *root_directory,
-                MountEntry *m,
-                const NamespaceParameters *p) {
-
-        _cleanup_free_ char *inaccessible = NULL;
-        bool rbind = true, make = false;
-        const char *what;
-        int r;
-
-        /* Return 1 when the mount should be post-processed (remounted r/o, etc.), 0 otherwise. In most
-         * cases post-processing is the right thing, the typical exception is when the mount is gracefully
-         * skipped. */
-
-        assert(m);
-        assert(p);
-
-        log_debug("Applying namespace mount on %s", mount_entry_path(m));
-
-        if (m->mode == MOUNT_BPFFS) {
-                r = mount_bpffs(m, p->bpffs_pidref, p->bpffs_socket_fd, p->bpffs_errno_pipe);
-                if (r >= 0 ||
-                    (!ERRNO_IS_NEG_NOT_SUPPORTED(r) && /* old kernel? */
-                     !ERRNO_IS_NEG_PRIVILEGE(r)))      /* ubuntu kernel bug? See issue #38225 */
-                        return r;
-
-                if (m->ignore) {
-                        log_debug_errno(r, "Failed to mount new bpffs instance, ignoring: %m");
-                        return 0;
-                }
-
-                log_debug_errno(r, "Failed to mount new bpffs instance at %s, will make read-only, ignoring: %m", mount_entry_path(m));
-                m->mode = MOUNT_READ_ONLY;
-                m->ignore = true;
-        }
-
-        switch (m->mode) {
-
-        case MOUNT_INACCESSIBLE: {
-                _cleanup_free_ char *runtime_dir = NULL;
-                struct stat target;
-
-                /* First, get rid of everything that is below if there
-                 * is anything... Then, overmount it with an
-                 * inaccessible path. */
-                (void) umount_recursive(mount_entry_path(m), 0);
-
-                if (lstat(mount_entry_path(m), &target) < 0) {
-                        if (errno == ENOENT && m->ignore)
-                                return 0;
-
-                        return log_debug_errno(errno, "Failed to lstat() %s to determine what to mount over it: %m",
-                                               mount_entry_path(m));
-                }
-
-                /* We don't pass the literal runtime scope through here but one based purely on our UID. This
-                 * means that the root user's --user services will use the host's inaccessible inodes rather
-                 * then root's private ones. This is preferable since it means device nodes that are
-                 * overmounted to make them inaccessible will be overmounted with a device node, rather than
-                 * an AF_UNIX socket inode. */
-                runtime_dir = settle_runtime_dir(geteuid() == 0 ? RUNTIME_SCOPE_SYSTEM : RUNTIME_SCOPE_USER);
-                if (!runtime_dir)
-                        return log_oom_debug();
-
-                r = mode_to_inaccessible_node(runtime_dir, target.st_mode, &inaccessible);
-                if (r < 0)
-                        return log_debug_errno(SYNTHETIC_ERRNO(ELOOP),
-                                               "File type not supported for inaccessible mounts. Note that symlinks are not allowed.");
-                what = inaccessible;
-                break;
-        }
-
-        case MOUNT_READ_ONLY:
-        case MOUNT_READ_WRITE:
-        case MOUNT_READ_WRITE_IMPLICIT:
-        case MOUNT_EXEC:
-        case MOUNT_NOEXEC:
-                r = path_is_mount_point_full(mount_entry_path(m), root_directory, /* flags= */ 0);
-                if (r == -ENOENT && m->ignore)
-                        return 0;
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to determine whether %s is already a mount point: %m",
-                                               mount_entry_path(m));
-                if (r > 0) /* Nothing to do here, it is already a mount. We just later toggle the MS_RDONLY
-                            * and MS_NOEXEC bits for the mount point if needed. */
-                        return 1;
-                /* This isn't a mount point yet, let's make it one. */
-                what = mount_entry_path(m);
-                break;
-
-        case MOUNT_EXTENSION_DIRECTORY: {
-                _cleanup_free_ char *host_os_release_id = NULL, *host_os_release_id_like = NULL,
-                                *host_os_release_version_id = NULL, *host_os_release_level = NULL,
-                                *extension_name = NULL;
-                _cleanup_strv_free_ char **extension_release = NULL;
-                ImageClass class = IMAGE_SYSEXT;
-
-                r = path_extract_filename(mount_entry_source(m), &extension_name);
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to extract extension name from %s: %m", mount_entry_source(m));
-
-                r = load_extension_release_pairs(
-                                mount_entry_source(m),
-                                m->filter_class >= 0 ? m->filter_class : IMAGE_SYSEXT,
-                                extension_name,
-                                /* relax_extension_release_check= */ false,
-                                &extension_release);
-                if (r == -ENOENT) {
-                        if (m->filter_class >= 0)
-                                return 0; /* Nothing to do, wrong class */
-
-                        r = load_extension_release_pairs(
-                                        mount_entry_source(m),
-                                        IMAGE_CONFEXT,
-                                        extension_name,
-                                        /* relax_extension_release_check= */ false,
-                                        &extension_release);
-                        if (r >= 0)
-                                class = IMAGE_CONFEXT;
-                }
-                if (r == -ENOENT && m->ignore)
-                        return 0;
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to acquire 'extension-release' data of extension tree %s: %m", mount_entry_source(m));
-
-                r = parse_os_release(
-                                empty_to_root(root_directory),
-                                "ID", &host_os_release_id,
-                                "ID_LIKE", &host_os_release_id_like,
-                                "VERSION_ID", &host_os_release_version_id,
-                                image_class_info[class].level_env, &host_os_release_level,
-                                NULL);
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to acquire 'os-release' data of OS tree '%s': %m", empty_to_root(root_directory));
-                if (isempty(host_os_release_id))
-                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "'ID' field not found or empty in 'os-release' data of OS tree '%s'.", empty_to_root(root_directory));
-
-                r = extension_release_validate(
-                                extension_name,
-                                host_os_release_id,
-                                host_os_release_id_like,
-                                host_os_release_version_id,
-                                host_os_release_level,
-                                /* host_extension_scope= */ NULL, /* Leave empty, we need to accept both system and portable */
-                                extension_release,
-                                class);
-                if (r < 0)
-                        return log_debug_errno(r, "Failed to compare directory %s extension-release metadata with the root's os-release: %m", extension_name);
-                if (r == 0)
-                        return log_debug_errno(SYNTHETIC_ERRNO(ESTALE), "Directory %s extension-release metadata does not match the root's.", extension_name);
-
-                _fallthrough_;
-        }
-
-        case MOUNT_BIND:
-                rbind = false;
-
-                _fallthrough_;
-        case MOUNT_BIND_RECURSIVE: {
-                _cleanup_free_ char *chased = NULL;
-
-                /* Since mount() will always follow symlinks we chase the symlinks on our own first. Note
-                 * that bind mount source paths are always relative to the host root, hence we pass NULL as
-                 * root directory to chase() here. */
-
-                /* When we create implicit mounts, we might need to create the path ourselves as it is on a
-                 * just-created tmpfs, for example. */
-                if (m->create_source_dir) {
-                        r = mkdir_p(mount_entry_source(m), m->source_dir_mode);
-                        if (r < 0)
-                                return log_debug_errno(r, "Failed to create source directory %s: %m", mount_entry_source(m));
-
-                        r = label_fix_full(AT_FDCWD, mount_entry_source(m), mount_entry_unprefixed_path(m), /* flags= */ 0, /* label_context= */ NULL);
-                        if (r < 0)
-                                return log_error_errno(r, "Failed to set label of the source directory %s: %m", mount_entry_source(m));
-                }
-
-                r = chase(mount_entry_source(m), NULL, CHASE_TRAIL_SLASH|CHASE_TRIGGER_AUTOFS, &chased, NULL);
-                if (r < 0) {
-                        if (m->ignore) {
-                                if (r == -ENOENT) {
-                                        log_debug_errno(r, "Path '%s' does not exist, ignoring.", mount_entry_source(m));
-                                        return 0;
-                                }
-                                if (ERRNO_IS_NEG_PRIVILEGE(r)) {
-                                        log_debug_errno(r, "Path '%s' is not accessible, ignoring: %m", mount_entry_source(m));
-                                        return 0;
-                                }
-                        }
-
-                        return log_debug_errno(r, "Failed to follow symlinks on %s: %m", mount_entry_source(m));
-                }
-
-                log_debug("Followed source symlinks %s %s %s.",
-                          mount_entry_source(m), glyph(GLYPH_ARROW_RIGHT), chased);
-
-                free_and_replace(m->source_malloc, chased);
-
-                what = mount_entry_source(m);
-                make = true;
-                break;
-        }
-
-        case MOUNT_EMPTY_DIR:
-        case MOUNT_PRIVATE_TMPFS:
-        case MOUNT_TMPFS:
-                return mount_tmpfs(m);
-
-        case MOUNT_PRIVATE_TMP:
-                what = mount_entry_source(m);
-                make = true;
-                break;
-
-        case MOUNT_PRIVATE_DEV:
-                return mount_private_dev(m, p);
-
-        case MOUNT_BIND_DEV:
-                return mount_bind_dev(m);
-
-        case MOUNT_PRIVATE_SYSFS:
-                return mount_private_sysfs(m, p);
-
-        case MOUNT_BIND_SYSFS:
-                return mount_bind_sysfs(m);
-
-        case MOUNT_PROCFS:
-                return mount_procfs(m, p);
-
-        case MOUNT_PRIVATE_CGROUP2FS:
-                return mount_private_cgroup2fs(m, p);
-
-        case MOUNT_RUN:
-                return mount_run(m);
-
-        case MOUNT_MQUEUEFS:
-                return mount_mqueuefs(m);
-
-        case MOUNT_IMAGE:
-                return mount_image(m, NULL, p->mount_image_policy, p->runtime_scope);
-
-        case MOUNT_EXTENSION_IMAGE:
-                return mount_image(m, root_directory, p->extension_image_policy, p->runtime_scope);
-
-        case MOUNT_OVERLAY:
-                return mount_overlay(m);
-
-        default:
-                assert_not_reached();
-        }
-
-        assert(what);
-
-        r = mount_bind(m, what, rbind, make);
-        if (r < 0)
-                return r;
-
-        log_debug("Successfully mounted %s to %s", what, mount_entry_path(m));
-
-        /* Take care of id-mapped mounts */
-        if (m->idmapped && uid_is_valid(m->idmap_uid) && gid_is_valid(m->idmap_gid)) {
-                _cleanup_close_ int userns_fd = -EBADF;
-                _cleanup_free_ char *uid_map = NULL, *gid_map = NULL;
-
-                log_debug("Setting an id-mapped mount on %s", mount_entry_path(m));
-
-                /* Do mapping from nobody (in setup_exec_directory()) -> this uid */
-                if (strextendf(&uid_map, UID_FMT " " UID_FMT " 1\n", UID_NOBODY, m->idmap_uid) < 0)
-                        return log_oom();
-
-                /* Consider StateDirectory=xxx aaa xxx:aaa/222
-                 * To allow for later symlink creation (by root) in create_symlinks_from_tuples(), map root as well. */
-                if (m->idmap_uid != 0)
-                        if (!strextend(&uid_map, "0 0 1\n"))
-                                return log_oom();
-
-                if (strextendf(&gid_map, GID_FMT " " GID_FMT " 1\n", GID_NOBODY, m->idmap_gid) < 0)
-                        return log_oom();
-
-                if (m->idmap_gid != 0)
-                        if (!strextend(&gid_map, "0 0 1\n"))
-                                return log_oom();
-
-                userns_fd = userns_acquire(uid_map, gid_map, /* setgroups_deny= */ true);
-                if (userns_fd < 0)
-                        return log_error_errno(userns_fd, "Failed to allocate user namespace: %m");
-
-                /* Drop SUID, add NOEXEC for the mount to avoid root exploits */
-                r = remount_idmap_fd(STRV_MAKE(mount_entry_path(m)), userns_fd, MOUNT_ATTR_NOSUID | MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NODEV);
-                if (r < 0)
-                        return log_error_errno(r, "Failed to create an id-mapped mount: %m");
-
-                log_debug("ID-mapped mount created successfully for %s from " UID_FMT " to " UID_FMT "", mount_entry_path(m), UID_NOBODY, m->idmap_uid);
-        }
-
-        return 1;
-}
-
 static bool namespace_parameters_mount_apivfs(const NamespaceParameters *p) {
         assert(p);
 
@@ -1261,159 +964,6 @@ static bool namespace_parameters_mount_apivfs(const NamespaceParameters *p) {
  * - that are outside of the relevant root directory
  * - which are duplicates
  */
-static int create_symlinks_from_tuples(const char *root, char **strv_symlinks) {
-        int r;
-
-        STRV_FOREACH_PAIR(src, dst, strv_symlinks) {
-                _cleanup_free_ char *src_abs = NULL, *dst_abs = NULL;
-
-                src_abs = path_join(root, *src);
-                dst_abs = path_join(root, *dst);
-                if (!src_abs || !dst_abs)
-                        return -ENOMEM;
-
-                r = mkdir_parents_label(dst_abs, 0755);
-                if (r < 0)
-                        return log_debug_errno(
-                                        r,
-                                        "Failed to create parent directory for symlink '%s': %m",
-                                        dst_abs);
-
-                r = symlink_idempotent(src_abs, dst_abs, true);
-                if (r < 0)
-                        return log_debug_errno(
-                                        r,
-                                        "Failed to create symlink from '%s' to '%s': %m",
-                                        src_abs,
-                                        dst_abs);
-        }
-
-        return 0;
-}
-
-static int apply_mounts(
-                MountList *ml,
-                const char *root,
-                const NamespaceParameters *p,
-                char **reterr_path) {
-
-        _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
-        _cleanup_free_ char **deny_list = NULL;
-        int r;
-
-        assert(ml);
-        assert(root);
-        assert(p);
-
-        if (ml->n_mounts == 0) /* Shortcut: nothing to do */
-                return 0;
-
-        /* Open /proc/self/mountinfo now as it may become unavailable if we mount anything on top of
-         * /proc. For example, this is the case with the option: 'InaccessiblePaths=/proc'. */
-        proc_self_mountinfo = fopen("/proc/self/mountinfo", "re");
-        if (!proc_self_mountinfo) {
-                r = -errno;
-
-                if (reterr_path)
-                        *reterr_path = strdup("/proc/self/mountinfo");
-
-                return log_debug_errno(r, "Failed to open %s: %m", "/proc/self/mountinfo");
-        }
-
-        /* First round, establish all mounts we need */
-        for (;;) {
-                bool again = false;
-
-                FOREACH_ARRAY(m, ml->mounts, ml->n_mounts) {
-
-                        if (m->state != MOUNT_PENDING)
-                                continue;
-
-                        /* ExtensionImages/Directories are first opened in the propagate directory, not in
-                         * the root_directory. A private (invisible to the guest) tmpfs instance is mounted
-                         * on /run/[user/xyz/]systemd/unit-private-tmp as the storage backend of private
-                         * /tmp and /var/tmp. */
-                        r = follow_symlink(!IN_SET(m->mode, MOUNT_EXTENSION_IMAGE, MOUNT_EXTENSION_DIRECTORY, MOUNT_PRIVATE_TMPFS) ? root : NULL, m);
-                        if (r < 0) {
-                                mount_entry_path_debug_string(root, m, reterr_path);
-                                return r;
-                        }
-                        if (r == 0) {
-                                /* We hit a symlinked mount point. The entry got rewritten and might
-                                 * point to a very different place now. Let's normalize the changed
-                                 * list, and start from the beginning. After all to mount the entry
-                                 * at the new location we might need some other mounts first */
-                                again = true;
-                                break;
-                        }
-
-                        /* Returns 1 if the mount should be post-processed, 0 otherwise */
-                        r = apply_one_mount(root, m, p);
-                        if (r < 0) {
-                                mount_entry_path_debug_string(root, m, reterr_path);
-                                return r;
-                        }
-                        m->state = r == 0 ? MOUNT_SKIPPED : MOUNT_APPLIED;
-                }
-
-                if (!again)
-                        break;
-
-                sort_and_drop_unused_mounts(ml, root);
-        }
-
-        /* Now that all filesystems have been set up, but before the
-         * read-only switches are flipped, create the exec dirs and other symlinks.
-         * Note that when /var/lib is not empty/tmpfs, these symlinks will already
-         * exist, which means this will be a no-op. */
-        r = create_symlinks_from_tuples(root, p->symlinks);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to set up symlinks inside mount namespace: %m");
-
-        /* Create a deny list we can pass to bind_mount_recursive() */
-        deny_list = new(char*, ml->n_mounts+1);
-        if (!deny_list)
-                return -ENOMEM;
-        for (size_t j = 0; j < ml->n_mounts; j++)
-                deny_list[j] = (char*) mount_entry_path(ml->mounts+j);
-        deny_list[ml->n_mounts] = NULL;
-
-        /* Second round, flip the ro bits if necessary. */
-        FOREACH_ARRAY(m, ml->mounts, ml->n_mounts) {
-                r = make_read_only(m, deny_list, proc_self_mountinfo);
-                if (r < 0) {
-                        mount_entry_path_debug_string(root, m, reterr_path);
-                        return r;
-                }
-        }
-
-        /* Third round, flip the noexec bits with a simplified deny list. */
-        for (size_t j = 0; j < ml->n_mounts; j++)
-                if (IN_SET((ml->mounts+j)->mode, MOUNT_EXEC, MOUNT_NOEXEC))
-                        deny_list[j] = (char*) mount_entry_path(ml->mounts+j);
-        deny_list[ml->n_mounts] = NULL;
-
-        FOREACH_ARRAY(m, ml->mounts, ml->n_mounts) {
-                r = make_noexec(m, deny_list, proc_self_mountinfo);
-                if (r < 0) {
-                        mount_entry_path_debug_string(root, m, reterr_path);
-                        return r;
-                }
-        }
-
-        /* Fourth round, flip the nosuid bits without a deny list. */
-        if (p->mount_nosuid)
-                FOREACH_ARRAY(m, ml->mounts, ml->n_mounts) {
-                        r = make_nosuid(m, proc_self_mountinfo);
-                        if (r < 0) {
-                                mount_entry_path_debug_string(root, m, reterr_path);
-                                return r;
-                        }
-                }
-
-        return 1;
-}
-
 static bool root_read_only(
                 char **read_only_paths,
                 ProtectSystem protect_system) {
@@ -1472,6 +1022,44 @@ static bool namespace_read_only(const NamespaceParameters *p) {
                                p->bind_mounts, p->n_bind_mounts, p->temporary_filesystems, p->n_temporary_filesystems,
                                p->protect_home) &&
                 strv_isempty(p->read_write_paths);
+}
+
+/* The modes mount_list_apply() hands back to us: our own filesystems, which need policy out of
+ * NamespaceParameters that shared code has no business knowing. */
+static int namespace_apply_special_mount(const char *root_directory, MountEntry *m, void *userdata) {
+        const NamespaceParameters *p = ASSERT_PTR(userdata);
+
+        assert(m);
+
+        switch (m->mode) {
+
+        case MOUNT_BPFFS:
+                return mount_bpffs(m, p->bpffs_pidref, p->bpffs_socket_fd, p->bpffs_errno_pipe);
+
+        case MOUNT_PRIVATE_DEV:
+                return mount_private_dev(m, p);
+
+        case MOUNT_BIND_DEV:
+                return mount_bind_dev(m);
+
+        case MOUNT_PRIVATE_SYSFS:
+                return mount_private_sysfs(m, p);
+
+        case MOUNT_PROCFS:
+                return mount_procfs(m, p);
+
+        case MOUNT_PRIVATE_CGROUP2FS:
+                return mount_private_cgroup2fs(m, p);
+
+        case MOUNT_IMAGE:
+                return mount_image(m, NULL, p->mount_image_policy, p->runtime_scope);
+
+        case MOUNT_EXTENSION_IMAGE:
+                return mount_image(m, root_directory, p->extension_image_policy, p->runtime_scope);
+
+        default:
+                assert_not_reached();
+        }
 }
 
 int setup_namespace(const NamespaceParameters *p, char **reterr_path) {
@@ -2084,7 +1672,7 @@ int setup_namespace(const NamespaceParameters *p, char **reterr_path) {
                 (void) base_filesystem_create(root, UID_INVALID, GID_INVALID);
 
         /* Now make the magic happen */
-        r = apply_mounts(&ml, root, p, reterr_path);
+        r = mount_list_apply(&ml, root, p->symlinks, p->mount_nosuid, namespace_apply_special_mount, (void*) p, reterr_path);
         if (r < 0)
                 return r;
 
@@ -2844,7 +2432,7 @@ static int refresh_apply_and_prune(const NamespaceParameters *p, MountList *ml) 
                 if (IN_SET(f->mode, MOUNT_EXTENSION_DIRECTORY, MOUNT_EXTENSION_IMAGE)) {
                         f->filter_class = IMAGE_CONFEXT;
 
-                        r = apply_one_mount("/", f, p);
+                        r = mount_list_apply_one("/", f, namespace_apply_special_mount, (void*) p);
                         if (r < 0)
                                 return r;
                         /* Nothing happened? Then it is not a confext, prune it from the lists */
