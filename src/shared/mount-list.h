@@ -141,3 +141,26 @@ int mount_run(const MountEntry *m);
 int mount_tmpfs(const MountEntry *m);
 char* settle_runtime_dir(RuntimeScope scope);
 void sort_and_drop_unused_mounts(MountList *ml, const char *root_directory);
+
+/* Modes whose implementation belongs to the caller rather than here: the service manager's own
+ * filesystems (procfs with its ProtectProc= handling, the private dev/sysfs/cgroup2fs instances),
+ * bpffs, and images, all of which need policy this file has no business knowing. Called for those
+ * modes only; its return value is the mount's result. */
+typedef int (*MountListApplySpecial)(const char *root_directory, MountEntry *m, void *userdata);
+
+/* Applies a single entry. Returns 1 if it should be post-processed (remounted read-only and so on),
+ * 0 if it was gracefully skipped. */
+int mount_list_apply_one(
+                const char *root_directory,
+                MountEntry *m,
+                MountListApplySpecial apply_special,
+                void *userdata);
+
+int mount_list_apply(
+                MountList *ml,
+                const char *root,
+                char **symlinks,
+                bool mount_nosuid,
+                MountListApplySpecial apply_special,
+                void *userdata,
+                char **reterr_path);
