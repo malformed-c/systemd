@@ -95,3 +95,49 @@ MountEntry* mount_list_extend(MountList *ml);
 
 int mount_path_compare(const MountEntry *a, const MountEntry *b);
 int prefix_where_needed(MountList *ml, const char *root_directory);
+
+/* Helper struct for naming simplicity and reusability */
+typedef struct ImageClassInfo {
+        const char *level_env;
+        const char *level_env_print;
+} ImageClassInfo;
+
+extern const ImageClassInfo image_class_info[_IMAGE_CLASS_MAX];
+
+const char* mount_mode_to_string(MountMode m) _const_;
+
+/* The mount primitives themselves. The caller still drives these; they move behind
+ * mount_list_apply() in a later step. */
+int bind_mount_device_dir(const char *temporary_mount, const char *dir);
+int clone_device_node(const char *node, const char *temporary_mount, bool *make_devnode);
+int create_temporary_mount_point(RuntimeScope scope, char **ret);
+int follow_symlink(
+                const char *root_directory,
+                MountEntry *m);
+int make_noexec(const MountEntry *m, char **deny_list, FILE *proc_self_mountinfo);
+int make_nosuid(const MountEntry *m, FILE *proc_self_mountinfo);
+int make_read_only(const MountEntry *m, char **deny_list, FILE *proc_self_mountinfo);
+int mount_bind_sysfs(const MountEntry *m);
+int mount_bind(
+                const MountEntry *m,
+                const char *what,
+                bool recursive,
+                bool make);
+int mount_bpffs(const MountEntry *m, PidRef *pidref, int socket_fd, int errno_pipe);
+int mount_image(
+                MountEntry *m,
+                const char *root_directory,
+                const ImagePolicy *image_policy,
+                RuntimeScope runtime_scope);
+int mount_mqueuefs(const MountEntry *m);
+int mount_overlay(const MountEntry *m);
+int mount_private_apivfs(
+                const char *fstype,
+                const char *entry_path,
+                const char *bind_source,
+                const char *opts,
+                RuntimeScope scope);
+int mount_run(const MountEntry *m);
+int mount_tmpfs(const MountEntry *m);
+char* settle_runtime_dir(RuntimeScope scope);
+void sort_and_drop_unused_mounts(MountList *ml, const char *root_directory);
