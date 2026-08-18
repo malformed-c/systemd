@@ -134,6 +134,28 @@ jobs:
           echo "${{ steps.systemd_version.outputs.line }}" > "$dist"/VERSION
           tar -czf "${dist}.tar.gz" "$dist"
 
+      - name: Verify the artifact is actually built for this arch
+        run: |
+          # A version string is identical across arches by construction, so it cannot detect a
+          # wrong-arch build. v262-apsis-14..19 shipped without a working arm64 asset because the
+          # CI config was rebuilt from the wrong tree and nobody noticed - every check that was
+          # run passed, because every check that was run was a string comparison. 'file' is the
+          # one that would have caught it, so assert on the ELF machine type here rather than
+          # relying on somebody downloading the other arch and looking.
+          dist="systemd-nspawn-${{ matrix.arch }}"
+          case "${{ matrix.arch }}" in
+                  amd64) want="x86-64"  ;;
+                  arm64) want="aarch64" ;;
+                  *)     echo "unknown arch '${{ matrix.arch }}', teach this step about it" >&2; exit 1 ;;
+          esac
+          for f in "$dist"/systemd-nspawn "$dist"/systemd-mstack "$dist"/libsystemd-shared-*.so; do
+                  got="$(file -b "$f")"
+                  case "$got" in
+                          *"$want"*) printf '  ok   %-28s %s\n' "${f##*/}" "$want" ;;
+                          *)         printf '  FAIL %-28s expected %s, got: %s\n' "${f##*/}" "$want" "$got" >&2; exit 1 ;;
+                  esac
+          done
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
