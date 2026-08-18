@@ -25,6 +25,7 @@
 #include "namespace.h"
 #include "path-util.h"
 #include "rm-rf.h"
+#include "stat-util.h"
 #include "pidref.h"
 #include "process-util.h"
 #include "string-util.h"
@@ -328,6 +329,86 @@ TEST(mstack_bind_vs_private_tmp) {
                         if (*private_tmp == PRIVATE_TMP_DISCONNECTED)
                                 ASSERT_OK_POSITIVE(path_is_mount_point("/var/tmp"));
 
+                        _exit(EXIT_SUCCESS);
+                }
+        }
+}
+
+/* setup_namespace() now applies its mounts through mount_list_apply() in shared code, with the
+ * service manager's own filesystems reached through a callback. These check that the sandbox still
+ * sandboxes on both sides of that split: PrivateDevices= and ProtectProc= go through the callback,
+ * ProtectSystem= is applied entirely by the generic path. */
+TEST(sandbox_still_sandboxes) {
+        int r;
+
+        if (geteuid() > 0)
+                return (void) log_tests_skipped("not root");
+        if (detect_container() > 0)
+                return (void) log_tests_skipped("in container");
+
+        r = dlopen_libmount(LOG_DEBUG);
+        if (ERRNO_IS_NEG_NOT_SUPPORTED(r))
+                return (void) log_tests_skipped("libmount support not compiled in");
+        ASSERT_OK(r);
+
+        /* ProtectSystem=strict: /usr read-only. Generic path, MOUNT_READ_ONLY. */
+        {
+                static const NamespaceParameters p = {
+                        .runtime_scope = RUNTIME_SCOPE_SYSTEM,
+                        .protect_system = PROTECT_SYSTEM_STRICT,
+                };
+
+                r = ASSERT_OK(pidref_safe_fork("(prot-sys)", FORK_WAIT|FORK_LOG|FORK_DEATHSIG_SIGKILL, /* ret= */ NULL));
+                if (r == 0) {
+                        ASSERT_OK_ZERO(setup_namespace(&p, NULL));
+                        log_info("ProtectSystem=strict -> /usr %s",
+                                 path_is_read_only_fs("/usr") > 0 ? "read-only" : "WRITABLE");
+                        ASSERT_OK_POSITIVE(path_is_read_only_fs("/usr"));
+                        _exit(EXIT_SUCCESS);
+                }
+        }
+
+        /* PrivateDevices=: /dev replaced by our own instance. Goes through the callback. */
+        {
+                static const NamespaceParameters p = {
+                        .runtime_scope = RUNTIME_SCOPE_SYSTEM,
+                        .private_dev = true,
+                };
+
+                r = ASSERT_OK(pidref_safe_fork("(priv-dev)", FORK_WAIT|FORK_LOG|FORK_DEATHSIG_SIGKILL, /* ret= */ NULL));
+                if (r == 0) {
+                        ASSERT_OK_ZERO(setup_namespace(&p, NULL));
+                        log_info("PrivateDevices= -> /dev %s, /dev/null %s, /dev/mem %s",
+                                 path_is_mount_point("/dev") > 0 ? "private" : "NOT A MOUNT",
+                                 access("/dev/null", F_OK) >= 0 ? "present" : "MISSING",
+                                 access("/dev/mem", F_OK) >= 0 ? "STILL THERE" : "gone");
+                        ASSERT_OK_POSITIVE(path_is_mount_point("/dev"));
+                        ASSERT_OK_ERRNO(access("/dev/null", F_OK));   /* the allow-list survives */
+                        ASSERT_ERROR_ERRNO(access("/dev/mem", F_OK), ENOENT); /* and the rest does not */
+                        _exit(EXIT_SUCCESS);
+                }
+        }
+
+        /* ProtectProc=invisible: other processes hidden. Goes through the callback. */
+        {
+                static const NamespaceParameters p = {
+                        .runtime_scope = RUNTIME_SCOPE_SYSTEM,
+                        .protect_proc = PROTECT_PROC_INVISIBLE,
+                        .private_pids = false,
+                };
+
+                r = ASSERT_OK(pidref_safe_fork("(prot-proc)", FORK_WAIT|FORK_LOG|FORK_DEATHSIG_SIGKILL, /* ret= */ NULL));
+                if (r == 0) {
+                        ASSERT_OK_ZERO(setup_namespace(&p, NULL));
+                        /* Check the mount carries hidepid=, not that a process is hidden: hidepid
+                         * conceals processes from other users, and this test runs as root, for whom it
+                         * does not apply. */
+                        _cleanup_free_ char *mountinfo = NULL;
+                        ASSERT_OK(read_full_file("/proc/self/mountinfo", &mountinfo, NULL));
+
+                        bool found = strstr(mountinfo, "hidepid=invisible") || strstr(mountinfo, "hidepid=2");
+                        log_info("ProtectProc=invisible -> /proc carries hidepid=: %s", yes_no(found));
+                        assert_se(found);
                         _exit(EXIT_SUCCESS);
                 }
         }
