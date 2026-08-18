@@ -4101,7 +4101,7 @@ static int outer_child(
                                 /* temp_mount_dir= */ directory, /* !! */
                                 mstack_flags,
                                 arg_mstack_uid_shift); /* UID_INVALID unless --mstack-uid-shift= was given; nspawn's
-                                                         * own --private-users= is a separate idmapping mechanism */
+                                                                   * own --private-users= is a separate idmapping mechanism */
                 if (r < 0)
                         return log_error_errno(r, "Failed to make .mstack/ mounts: %m");
 
