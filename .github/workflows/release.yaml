@@ -1,0 +1,192 @@
+---
+name: Build and Release systemd-nspawn
+
+on:
+  workflow_dispatch: # Run manually
+  push:
+    tags:
+      - "v*" # Triggers when a tag like v1.0.1 pushed
+
+permissions:
+  contents: write # Required to create a release and upload assets
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  # We tell Meson to use ccache as a wrapper for the compiler
+  CC: "ccache gcc"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-24.04
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Apt Packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-${{ matrix.arch }}-apt-packages
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libseccomp-dev \
+            libpam0g-dev \
+            meson \
+            ninja-build \
+            pkg-config \
+            patchelf \
+            gcc \
+            libbpf-dev linux-tools-common linux-tools-generic linux-tools-$(uname -r) \
+            clang \
+            llvm \
+            ccache \
+            gperf \
+            bison \
+            flex \
+            gettext \
+            libcap-dev \
+            libselinux1-dev \
+            libsystemd-dev \
+            util-linux libmount-dev libblkid-dev \
+            python3-pip
+
+      - name: Fix bpftool path
+        run: |
+          # Find where the actual binary is located
+          BPFTOOL_PATH=$(find /usr/lib/linux-tools-$(uname -r) -name bpftool | head -n 1)
+
+          # If not found there, try the generic tools path
+          if [ -z "$BPFTOOL_PATH" ]; then
+            BPFTOOL_PATH=$(find /usr/lib/linux-tools-* -name bpftool | head -n 1)
+          fi
+
+          echo "Found bpftool at: $BPFTOOL_PATH"
+
+          # Force link it to the location Meson expects
+          sudo ln -sf "$BPFTOOL_PATH" /usr/sbin/bpftool
+
+          # Verify it works
+          /usr/sbin/bpftool --version
+
+      - name: Caching ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          # The key changes if the OS or arch changes, ensuring we don't use
+          # caches from different Ubuntu versions/architectures.
+          key: ${{ runner.os }}-${{ matrix.arch }}-ccache-${{ github.sha }}
+          # restore-keys allows us to pull the most recent cache
+          # even if the exact SHA doesn't match
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-ccache-
+
+      - name: Configure ccache
+        run: |
+          ccache -M 500M # Limit cache size to 500MB to avoid GH Action limits
+
+      - name: Configure Build (Meson)
+        run: |
+          meson setup build \
+            -Dstandalone-binaries=true \
+            --buildtype=release
+
+      - name: Build systemd-nspawn and systemd-mstack
+        run: |
+          ninja -C build systemd-nspawn systemd-mstack
+
+      - name: Patch rpath
+        run: |
+          patchelf --set-rpath '$ORIGIN' build/systemd-nspawn
+          patchelf --set-rpath '$ORIGIN' build/systemd-mstack
+
+      - name: Get systemd version
+        id: systemd_version
+        run: |
+          # Before the release assets are flattened into one directory, the shared lib
+          # still lives under build/src/shared/, not next to the $ORIGIN-rpath'd binary.
+          VERSION_LINE="$(LD_LIBRARY_PATH=build/src/shared build/systemd-nspawn --version | head -n1)"
+          echo "line=${VERSION_LINE}" >> "$GITHUB_OUTPUT"
+
+      - name: Package artifacts
+        run: |
+          # Bundle each arch's binaries + shared lib together under one archive name so
+          # the amd64 and arm64 uploads don't collide over identically-named files
+          # (systemd-nspawn, libsystemd-shared-*.so) on the same GitHub Release.
+          dist="systemd-nspawn-${{ matrix.arch }}"
+          mkdir -p "$dist"
+          cp build/systemd-nspawn build/systemd-mstack "$dist"/
+          cp build/src/shared/libsystemd-shared-*.so "$dist"/
+          echo "${{ steps.systemd_version.outputs.line }}" > "$dist"/VERSION
+          tar -czf "${dist}.tar.gz" "$dist"
+
+      - name: Verify the artifact is actually built for this arch
+        run: |
+          # A version string is identical across arches by construction, so it cannot detect a
+          # wrong-arch build. v262-apsis-14..19 shipped without a working arm64 asset because the
+          # CI config was rebuilt from the wrong tree and nobody noticed - every check that was
+          # run passed, because every check that was run was a string comparison. 'file' is the
+          # one that would have caught it, so assert on the ELF machine type here rather than
+          # relying on somebody downloading the other arch and looking.
+          dist="systemd-nspawn-${{ matrix.arch }}"
+          case "${{ matrix.arch }}" in
+                  amd64) want="x86-64"  ;;
+                  arm64) want="aarch64" ;;
+                  *)     echo "unknown arch '${{ matrix.arch }}', teach this step about it" >&2; exit 1 ;;
+          esac
+          for f in "$dist"/systemd-nspawn "$dist"/systemd-mstack "$dist"/libsystemd-shared-*.so; do
+                  got="$(file -b "$f")"
+                  case "$got" in
+                          *"$want"*) printf '  ok   %-28s %s\n' "${f##*/}" "$want" ;;
+                          *)         printf '  FAIL %-28s expected %s, got: %s\n' "${f##*/}" "$want" "$got" >&2; exit 1 ;;
+                  esac
+          done
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: systemd-nspawn-${{ matrix.arch }}
+          path: systemd-nspawn-${{ matrix.arch }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get systemd version
+        id: systemd_version
+        run: |
+          tar -xzOf artifacts/systemd-nspawn-amd64/systemd-nspawn-amd64.tar.gz systemd-nspawn-amd64/VERSION > version.txt
+          echo "line=$(cat version.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # This automatically creates the release based on the tag (e.g., v1.0.1)
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
+          draft: false
+          body: |
+            Built from `${{ steps.systemd_version.outputs.line }}`
+          # Uploads each arch's archive to the release page
+          files: |
+            artifacts/systemd-nspawn-amd64/systemd-nspawn-amd64.tar.gz
+            artifacts/systemd-nspawn-arm64/systemd-nspawn-arm64.tar.gz
