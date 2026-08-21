@@ -6342,12 +6342,6 @@ static int run(int argc, char *argv[]) {
         if (r < 0)
                 goto finish;
 
-        if (!FLAGS_SET(arg_settings_mask, SETTING_RESTRICT_ADDRESS_FAMILIES) && !arg_restrict_address_families)
-                log_notice("Note: in a future version of systemd-nspawn the default set of permitted socket address"
-                           " families will be restricted to AF_INET, AF_INET6 and AF_UNIX."
-                           " Use --restrict-address-families= to configure the set of permitted socket address"
-                           " families, or set RestrictAddressFamilies= in a .nspawn file.");
-
         /* If we're not unsharing the network namespace and are unsharing the user namespace, we won't have
          * permissions to bind ports in the container, so let's drop the CAP_NET_BIND_SERVICE capability to
          * indicate that. */
