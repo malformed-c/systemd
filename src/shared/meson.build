@@ -146,6 +146,7 @@ shared_sources = files(
         'mkfs-util.c',
         'module-util.c',
         'mount-setup.c',
+        'mount-list.c',
         'mount-util.c',
         'mstack.c',
         'net-condition.c',
