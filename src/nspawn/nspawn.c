@@ -2859,13 +2859,13 @@ static int recursive_chown(const char *directory, uid_t shift, uid_t range) {
 /*
  * Return values:
  * < 0 : pidref_wait_for_terminate() failed to get the state of the
- *       container, the container was terminated by a signal, or
- *       failed for an unknown reason.  No change is made to the
- *       container argument.
+ *       container, or it failed for an unknown reason.  No change is
+ *       made to the container argument.
  * > 0 : The program executed in the container terminated with an
- *       error.  The exit code of the program executed in the
- *       container is returned.  The container argument has been set
- *       to CONTAINER_TERMINATED.
+ *       error, or was killed by a signal.  In the former case its
+ *       exit code is returned, in the latter 128 + the signal number,
+ *       following the convention shells use.  The container argument
+ *       has been set to CONTAINER_TERMINATED.
  *   0 : The container is being rebooted, has been shut down or exited
  *       successfully.  The container argument has been set to either
  *       CONTAINER_TERMINATED or CONTAINER_REBOOTED.
@@ -2911,8 +2911,19 @@ static int wait_for_container(PidRef *pid, ContainerStatus *container) {
 
                 _fallthrough_;
         case CLD_DUMPED:
-                return log_error_errno(SYNTHETIC_ERRNO(EIO),
-                                       "Container %s terminated by signal %s.", arg_machine, signal_to_string(status.si_status));
+                log_error("Container %s terminated by signal %s.", arg_machine, signal_to_string(status.si_status));
+
+                /* Report signal deaths the way a shell does, as 128 + the signal number, so that callers can
+                 * tell *which* signal killed the payload from our exit status alone. Previously we returned
+                 * -EIO here, which the caller turns into a plain EXIT_FAILURE - indistinguishable from a
+                 * payload that deliberately exited 1, and leaving the signal number recoverable only by
+                 * scraping the log line above.
+                 *
+                 * Note that SIGTRAP lands on 128 + 5 = 133 = EXIT_FORCE_RESTART, which our caller reserves
+                 * for the reboot protocol and remaps to EXIT_FAILURE. A SIGTRAP death therefore still
+                 * reports as 1; it is not mistaken for a reboot request. */
+                *container = CONTAINER_TERMINATED;
+                return 128 + status.si_status;
 
         default:
                 return log_error_errno(SYNTHETIC_ERRNO(EIO),
